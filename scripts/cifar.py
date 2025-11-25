@@ -128,7 +128,11 @@ def train_sgd(
             optimizer.step()
 
             if val_loader is not None:
-                val_inputs, val_targets = next(iter(val_loader))
+                try:
+                    val_inputs, val_targets = next(val_iter)
+                except StopIteration:
+                    val_iter = iter(val_loader)
+                    val_inputs, val_targets = next(val_iter)
                 val_inputs, val_targets = val_inputs.to(device=device, dtype=dtype), val_targets.to(device=device)
                 val_outputs = model(val_inputs)
                 val_loss = criterion(val_outputs, val_targets)
@@ -183,7 +187,7 @@ def train_es(
         inputs, targets = inputs.to(device=device, dtype=dtype), targets.to(device=device)
         logger.print_header()
 
-        for j in range(iters_per_batch):
+        for _ in range(iters_per_batch):
             optimizer.mutate()
             
             outputs = model(inputs)
@@ -202,7 +206,11 @@ def train_es(
                 log_vals = [i+1, step_count, avg_loss, min_loss]
 
                 if val_loader is not None:
-                    val_inputs, val_targets = next(val_iter)
+                    try:
+                        val_inputs, val_targets = next(val_iter)
+                    except StopIteration:
+                        val_iter = iter(val_loader)
+                        val_inputs, val_targets = next(val_iter)
                     val_inputs, val_targets = val_inputs.to(device=device, dtype=dtype), val_targets.to(device=device)
                     val_outputs = model(val_inputs)
                     val_loss = criterion(val_outputs, val_targets)
