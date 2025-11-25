@@ -24,13 +24,6 @@ class AdamParams(OptimizerParams):
 
 
 @dataclass
-class OptimizerConfig:
-    sgd: SGDParams | None = field(default_factory=SGDParams)
-    adam: AdamParams | None = None
-    es: Optional["ESParams"] = None
-
-
-@dataclass
 class SampleStrategy:
     temp: float = 1.0
 
@@ -48,6 +41,23 @@ class ESParams(OptimizerParams):
     agg_strategy: PopulationAggStrategy = field(default_factory=PopulationAggStrategy)
     include_parent: bool = True
     persist_parent: bool = True
+
+
+@dataclass
+class OptimizerConfig:
+    type: str = "sgd"
+    sgd: SGDParams = field(default_factory=SGDParams)
+    adam: AdamParams = field(default_factory=AdamParams)
+    es: ESParams = field(default_factory=ESParams)
+
+    @staticmethod
+    def make_run_id(cfg: "OptimizerConfig") -> str:
+        if cfg.type == "sgd":
+            return f"sgd-lr{cfg.sgd.lr}"
+        elif cfg.type == "es":
+            return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}"
+        else:
+            return ""
 
 
 @dataclass
@@ -205,7 +215,7 @@ def get_optimizer(
     params: Iterable[nn.parameter.Parameter],
     config: OptimizerConfig,
 ) -> torch.optim.Optimizer | ESOptimizer:
-    if config.es is not None:
+    if config.type == "es":
         sample_temp = (config.es.agg_strategy.sample.temp if
                        config.es.agg_strategy.sample is not None else 1.0)
         return ESOptimizer(
@@ -218,7 +228,7 @@ def get_optimizer(
             include_parent=config.es.include_parent,
             persist_parent=config.es.persist_parent,
         )
-    elif config.sgd is not None:
+    elif config.type == "sgd":
         return torch.optim.SGD(
             params,
             lr=config.sgd.lr,
@@ -226,14 +236,13 @@ def get_optimizer(
             weight_decay=config.sgd.weight_decay,
             nesterov=config.sgd.nesterov,
         )
-    elif config.adam is not None:
-        adam_cfg = config.adam
+    elif config.type == "adam":
         return torch.optim.AdamW(
             params,
-            lr=adam_cfg.lr,
-            betas=adam_cfg.betas,
-            eps=adam_cfg.eps,
-            weight_decay=adam_cfg.weight_decay,
+            lr=config.adam.lr,
+            betas=config.adam.betas,
+            eps=config.adam.eps,
+            weight_decay=config.adam.weight_decay,
         )
     else:
         raise RuntimeError("no optimizer config specified")

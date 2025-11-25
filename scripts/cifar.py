@@ -10,6 +10,12 @@ from torch.utils.data import DataLoader
 from dataclasses import dataclass, field
 from tqdm.auto import tqdm
 from omegaconf import OmegaConf
+import contextlib
+try:
+    import wandb
+    from wandb import Run as WandbRun
+except ImportError:
+    wandb = None
 
 from no_grad.optim import get_optimizer, OptimizerConfig, ESOptimizer
 from no_grad.utils import Logger
@@ -24,7 +30,8 @@ class TrainConfig:
     cifar_path: str = "./data"
     es_updates_per_batch: int = 1
     optimizer_config: OptimizerConfig = field(default_factory=OptimizerConfig)
-    wandb_project_name: str = "no_grad"
+    wandb_project_name: str = "no_grad-cifar"
+    report_to_wandb: bool = False
 
 
 def load_model(checkpoint_path: str, eval_mode: bool = False):
@@ -89,6 +96,7 @@ def train_sgd(
     val_loader: DataLoader | None = None,
     iters_per_batch: int = 1,
     use_tqdm: bool = False,
+    wandb_run: "WandbRun | None" = None,
 ):
     criterion = nn.CrossEntropyLoss()
 
@@ -129,6 +137,14 @@ def train_sgd(
             step_count += 1
             logger.print_metrics(*log_vals)
 
+            if wandb_run is not None:
+                # map 'train loss' to 'avg loss' and to 'min loss' so wandb can overlay plots
+                vals = {k: v for k, v in zip([m[0] for m in log_metrics], log_vals)}
+                vals.update({"avg loss": vals["train loss"], "min loss": vals["train loss"]})
+                # map 'step_count' to 'forwards' (one forward pass per training step)
+                vals["forwards"] = step_count
+                wandb_run.log(vals)
+
             if use_tqdm:
                 pbar.update(1)
 
@@ -144,6 +160,7 @@ def train_es(
     val_loader: DataLoader | None = None,
     iters_per_batch: int = 1,
     use_tqdm: bool = False,
+    wandb_run: "WandbRun | None" = None,
 ):
     val_iter = iter(val_loader)
 
@@ -196,6 +213,12 @@ def train_es(
                 step_count += 1
                 logger.print_metrics(*log_vals)
 
+                if wandb_run is not None:
+                    vals = {k: v for k, v in zip([m[0] for m in log_metrics], log_vals)}
+                    # track forward pass count
+                    vals["forwards"] = step_count * optimizer.population_size
+                    wandb_run.log(vals)
+
             if use_tqdm:
                 pbar.update(1)
 
@@ -221,22 +244,33 @@ def main():
         model.parameters(),
         cfg.optimizer_config,
     )
-    if isinstance(optimizer, ESOptimizer):
-        train_es(
-            model,
-            train_loader,
-            optimizer,
-            val_loader=val_loader,
-            iters_per_batch=cfg.es_updates_per_batch * cfg.optimizer_config.es.population_size,
+    if wandb is not None and cfg.report_to_wandb:
+        run_ctx = wandb.init(
+            project=cfg.wandb_project_name,
+            config=OmegaConf.to_container(cfg.optimizer_config, resolve=True),
+            id=OptimizerConfig.make_run_id(cfg.optimizer_config),
         )
     else:
-        train_sgd(
-            model,
-            train_loader,
-            optimizer,
-            val_loader=val_loader,
-            iters_per_batch=1,
-        )
+        run_ctx = contextlib.nullcontext()
+    with run_ctx as maybe_wandb_run:
+        if isinstance(optimizer, ESOptimizer):
+            train_es(
+                model,
+                train_loader,
+                optimizer,
+                val_loader=val_loader,
+                iters_per_batch=cfg.es_updates_per_batch * cfg.optimizer_config.es.population_size,
+                wandb_run=maybe_wandb_run,
+            )
+        else:
+            train_sgd(
+                model,
+                train_loader,
+                optimizer,
+                val_loader=val_loader,
+                iters_per_batch=1,
+                wandb_run=maybe_wandb_run,
+            )
 
 
 if __name__ == "__main__":
