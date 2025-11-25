@@ -98,6 +98,8 @@ def train_sgd(
     use_tqdm: bool = False,
     wandb_run: "WandbRun | None" = None,
 ):
+    val_iter = iter(val_loader)
+
     criterion = nn.CrossEntropyLoss()
 
     sample_param = next(model.parameters())
