@@ -25,13 +25,13 @@ class AdamParams(OptimizerParams):
 
 @dataclass
 class SampleStrategy:
-    temp: float = 1.0
+    temp: float = 0.0
 
 
 @dataclass
 class PopulationAggStrategy:
     weighted_sum: bool | None = True
-    sample: SampleStrategy | None = None
+    sample: SampleStrategy = field(default_factory=SampleStrategy)
 
 
 @dataclass
@@ -55,7 +55,10 @@ class OptimizerConfig:
         if cfg.type == "sgd":
             return f"sgd-lr{cfg.sgd.lr}"
         elif cfg.type == "es":
-            return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}"
+            id = f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}"
+            if not cfg.es.agg_strategy.weighted_sum:
+                id += f"-sample_t{cfg.es.agg_strategy.sample.temp}"
+                return id
         else:
             return ""
 
