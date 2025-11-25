@@ -205,7 +205,7 @@ class ESOptimizer:
                 p_deltas, _ = zip(*[next(d) for d in deltas])
     
                 for p_delta, z in zip(p_deltas, z_scores):
-                    p += p_delta * self.lr * z / n
+                    p += p_delta * self.lr * z / n / self.step_size
 
         self.mutations = []
         # print("done")

@@ -1,4 +1,4 @@
 optimizer_config:
   type: es
   es:
-    lr: 1.5
+    lr: 1.5e-2
