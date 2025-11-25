@@ -1,0 +1,3 @@
+optimizer_config:
+  es:
+    lr: 4.0

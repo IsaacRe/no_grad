@@ -1,0 +1,4 @@
+optimizer_config:
+  sgd:
+    momentum: 0.0
+    weight_decay: 0.0
