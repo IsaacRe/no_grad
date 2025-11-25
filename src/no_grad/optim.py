@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from typing import Iterable
 import torch
 import torch.nn as nn
 
@@ -10,7 +10,7 @@ class OptimizerParams:
 
 
 @dataclass
-class SGDParams(OptimizerParams):
+class MomentumParams(OptimizerParams):
     momentum: float = 0.9
     weight_decay: float = 1e-4
     nesterov: bool = False
@@ -44,21 +44,30 @@ class ESParams(OptimizerParams):
 
 
 @dataclass
+class ESAdamParams(OptimizerParams):
+    betas: tuple = (0.9, 0.999)
+    eps: float = 1e-8
+    weight_decay: float = 1e-4
+
+
+@dataclass
 class OptimizerConfig:
     type: str = "sgd"
-    sgd: SGDParams = field(default_factory=SGDParams)
+    sgd: MomentumParams = field(default_factory=MomentumParams)
     adam: AdamParams = field(default_factory=AdamParams)
     es: ESParams = field(default_factory=ESParams)
+    es_adam: ESAdamParams = field(default_factory=ESAdamParams)
 
     @staticmethod
     def make_run_id(cfg: "OptimizerConfig") -> str:
         if cfg.type == "sgd":
             return f"sgd-lr{cfg.sgd.lr}"
         elif cfg.type == "es":
-            id = f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}"
-            if not cfg.es.agg_strategy.weighted_sum:
-                id += f"-sample_t{cfg.es.agg_strategy.sample.temp}"
-                return id
+            return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}"
+        elif cfg.type == "adam":
+            return f"adam-lr{cfg.adam.lr}-b{cfg.adam.betas[0]}_{cfg.adam.betas[1]}-w{cfg.adam.weight_decay}-e{cfg.adam.eps}"
+        elif cfg.type == "es_adam":
+            return f"es_adam-lr{cfg.es_adam.lr}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}"
         else:
             return ""
 
