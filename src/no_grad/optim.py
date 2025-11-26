@@ -235,7 +235,7 @@ def get_optimizer(
             step_size=config.es.step_size,
             lr=config.es.lr,
             population_size=config.es.population_size,
-            do_sample=config.es.agg_strategy.sample is not None,
+            do_sample=not config.es.agg_strategy.weighted_sum,
             sample_temp=sample_temp,
             include_parent=config.es.include_parent,
             persist_parent=config.es.persist_parent,
