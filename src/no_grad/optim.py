@@ -63,7 +63,10 @@ class OptimizerConfig:
         if cfg.type == "sgd":
             return f"sgd-lr{cfg.sgd.lr}"
         elif cfg.type == "es":
-            return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}"
+            if not cfg.es.agg_strategy.weighted_sum:
+                return f"es-sample_t{cfg.es.agg_strategy.sample.temp}-p{cfg.es.population_size}-s{cfg.es.step_size}"
+            else:
+                return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}"
         elif cfg.type == "adam":
             return f"adam-lr{cfg.adam.lr}-b{cfg.adam.betas[0]}_{cfg.adam.betas[1]}-w{cfg.adam.weight_decay}-e{cfg.adam.eps}"
         elif cfg.type == "es_adam":
