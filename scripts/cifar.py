@@ -255,10 +255,12 @@ def main():
         cfg.optimizer_config,
     )
     if wandb is not None and cfg.report_to_wandb:
+        run_id = OptimizerConfig.make_run_id(cfg.optimizer_config)
+        run_id = f"{run_id}-b{cfg.batch_size}"
         run_ctx = wandb.init(
             project=cfg.wandb_project_name,
             config=OmegaConf.to_container(cfg.optimizer_config, resolve=True),
-            id=OptimizerConfig.make_run_id(cfg.optimizer_config),
+            id=run_id,
         )
     else:
         run_ctx = contextlib.nullcontext()
