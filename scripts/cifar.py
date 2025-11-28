@@ -179,7 +179,7 @@ def train_es(
     avg_loss = 0
     min_loss = 1000
     step_count = 0
-    log_metrics = [("batch", f"{{}}/{len(train_loader)}"), ("step", "{}"), ("avg loss", "{:.6f}"), ("min loss", "{:.6f}")]
+    log_metrics = [("batch", f"{{}}/{len(train_loader)}"), ("step", "{}"), ("avg loss", "{:.6f}"), ("min loss", "{:.6f}"), ("lr", "{:.6f}")]
     if val_loader is not None:
         log_metrics.append(("val loss", "{:.6f}"))
     logger = Logger(*log_metrics, column_width=12)
@@ -205,7 +205,7 @@ def train_es(
             # (this will be higher than loss for aggregated model)
             if optimizer.mutation_index == -1:
                 avg_loss /= optimizer.population_size
-                log_vals = [i+1, step_count, avg_loss, min_loss]
+                log_vals = [i+1, step_count, avg_loss, min_loss, optimizer.lr]
 
                 if val_loader is not None:
                     try:

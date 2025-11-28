@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 @dataclass
 class OptimizerParams:
     lr: float = 1e-3
+    lr_gamma: float = 1.0  # no lr decay
 
 
 @dataclass
@@ -68,11 +69,13 @@ class OptimizerConfig:
             if not cfg.es.agg_strategy.weighted_sum:
                 return f"es-sample_t{cfg.es.agg_strategy.sample.temp}-p{cfg.es.population_size}-s{cfg.es.step_size}"
             else:
-                return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}"
+                gamma = f"-gamma{cfg.es.lr_gamma}" if cfg.es.lr_gamma != 1.0 else ""
+                return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}{gamma}"
         elif cfg.type == "adam":
             return f"adam-lr{cfg.adam.lr}-b{cfg.adam.betas[0]}_{cfg.adam.betas[1]}-w{cfg.adam.weight_decay}-e{cfg.adam.eps}"
         elif cfg.type == "es_adam":
-            return f"es_adam-lr{cfg.es_adam.lr}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}"
+            gamma = f"-gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
+            return f"es_adam-lr{cfg.es_adam.lr}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{gamma}"
         else:
             return ""
 
@@ -100,6 +103,7 @@ class ESOptimizer:
         betas: tuple = (0.9, 0.999),
         epsilon: float = 1e-8,
         weight_decay: float = 0.0,
+        gamma: float = 1.0,
     ):
         self.step = 0
         self.params = list(params)
@@ -117,6 +121,7 @@ class ESOptimizer:
         self.weight_decay = weight_decay
         self.epsilon = epsilon
         self.parent_params = None
+        self.gamma = gamma
         if persist_parent:
             # create separate parameter list with shared data
             self.parent_params = [p.clone() for p in self.params]
@@ -201,6 +206,7 @@ class ESOptimizer:
 
         if len(self.mutations) % self.population_size == 0:
             self.aggregate_mutations()
+            self.lr_step()
 
         self.step += 1
 
@@ -258,6 +264,9 @@ class ESOptimizer:
         self.mutations = []
         # print("done")
 
+    def lr_step(self):
+        self.lr *= self.gamma
+
 
 def get_optimizer(
     params: Iterable[nn.parameter.Parameter],
@@ -275,6 +284,7 @@ def get_optimizer(
             sample_temp=sample_temp,
             include_parent=config.es.include_parent,
             persist_parent=config.es.persist_parent,
+            gamma=config.es.lr_gamma,
         )
     elif config.type == "es_adam":
         sample_temp = (config.es_adam.agg_strategy.sample.temp if
@@ -292,6 +302,7 @@ def get_optimizer(
             betas=config.es_adam.betas,
             epsilon=config.es_adam.eps,
             weight_decay=config.es_adam.weight_decay,
+            gamma=config.es_adam.lr_gamma,
         )
     elif config.type == "sgd":
         return torch.optim.SGD(
