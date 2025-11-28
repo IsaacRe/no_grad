@@ -1,0 +1,4 @@
+optimizer_config:
+  type: adam
+  adam:
+    lr: 1e-3

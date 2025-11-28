@@ -1,0 +1,4 @@
+optimizer_config:
+  type: es_adam
+  es_adam:
+    lr: 1.5e-2

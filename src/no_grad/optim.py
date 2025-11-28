@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from typing import Iterable
 import torch
 import torch.nn as nn
+import math
+from tqdm.auto import tqdm
 
 
 @dataclass
@@ -44,7 +46,7 @@ class ESParams(OptimizerParams):
 
 
 @dataclass
-class ESAdamParams(OptimizerParams):
+class ESAdamParams(ESParams):
     betas: tuple = (0.9, 0.999)
     eps: float = 1e-8
     weight_decay: float = 1e-4
@@ -94,7 +96,12 @@ class ESOptimizer:
         sample_temp=1.0,
         include_parent=True,
         persist_parent=True,
+        use_adam: bool = False,
+        betas: tuple = (0.9, 0.999),
+        epsilon: float = 1e-8,
+        weight_decay: float = 0.0,
     ):
+        self.step = 0
         self.params = list(params)
         self.mutations: list[EvMutation] = []
         self.active_mutation: EvMutation | None = None
@@ -105,12 +112,20 @@ class ESOptimizer:
         self.sample_temp = sample_temp
         self.include_parent = include_parent
         self.persist_parent = persist_parent
+        self.use_adam = use_adam
+        self.betas = betas
+        self.weight_decay = weight_decay
+        self.epsilon = epsilon
         self.parent_params = None
         if persist_parent:
             # create separate parameter list with shared data
             self.parent_params = [p.clone() for p in self.params]
             for p, p_parent in zip(self.params, self.parent_params):
                 p_parent.data = p.data
+        if use_adam:
+            # initialize first and second moments for each param
+            self.exp_avg = [torch.zeros_like(p) for p in self.params]
+            self.exp_avg_sq = [torch.zeros_like(p) for p in self.params]
 
     def __enter__(self):
         return self
@@ -187,6 +202,8 @@ class ESOptimizer:
         if len(self.mutations) % self.population_size == 0:
             self.aggregate_mutations()
 
+        self.step += 1
+
     @torch.no_grad()
     def aggregate_mutations(self):
         if self.active_mutation is not None:
@@ -215,12 +232,28 @@ class ESOptimizer:
             var_reward = sum((m.reward - mean_reward) ** 2 for m in self.mutations) / n
             z_scores = [(m.reward - mean_reward) / (var_reward ** 0.5) for m in self.mutations if not m.is_identity]
     
+            if self.use_adam:
+                bc1 = 1 - self.betas[0] ** self.step
+                bc2 = 1 - self.betas[1] ** self.step
+
             deltas = [self._param_delta_iter(m.param_seeds) for m in self.mutations if not m.is_identity]
-            for p in self.params:
+            for i, p in enumerate(tqdm(self.params)):
                 p_deltas, _ = zip(*[next(d) for d in deltas])
     
+                agg_p_delta = torch.zeros_like(p)
                 for p_delta, z in zip(p_deltas, z_scores):
-                    p += p_delta * self.lr * z / n / self.step_size
+                    agg_p_delta += p_delta * z / n / self.step_size
+
+                if self.use_adam:
+                    # decay first and second moments
+                    self.exp_avg[i] = self.betas[0] * self.exp_avg[i] + (1 - self.betas[0]) * agg_p_delta
+                    self.exp_avg_sq[i] = self.betas[1] * self.exp_avg_sq[i] + (1 - self.betas[1]) * (agg_p_delta ** 2)
+                    denominator = self.exp_avg_sq[i].sqrt() + self.epsilon
+                    step_size = self.lr * math.sqrt(bc2) / bc1
+
+                    p += step_size * (self.exp_avg[i] / denominator - self.weight_decay * p)
+                else:
+                    p += agg_p_delta * self.lr
 
         self.mutations = []
         # print("done")
@@ -243,6 +276,23 @@ def get_optimizer(
             include_parent=config.es.include_parent,
             persist_parent=config.es.persist_parent,
         )
+    elif config.type == "es_adam":
+        sample_temp = (config.es_adam.agg_strategy.sample.temp if
+                       config.es_adam.agg_strategy.sample is not None else 1.0)
+        return ESOptimizer(
+            params,
+            step_size=config.es_adam.step_size,
+            lr=config.es_adam.lr,
+            population_size=config.es_adam.population_size,
+            do_sample=not config.es_adam.agg_strategy.weighted_sum,
+            sample_temp=sample_temp,
+            include_parent=config.es_adam.include_parent,
+            persist_parent=config.es_adam.persist_parent,
+            use_adam=True,
+            betas=config.es_adam.betas,
+            epsilon=config.es_adam.eps,
+            weight_decay=config.es_adam.weight_decay,
+        )
     elif config.type == "sgd":
         return torch.optim.SGD(
             params,
@@ -260,4 +310,4 @@ def get_optimizer(
             weight_decay=config.adam.weight_decay,
         )
     else:
-        raise RuntimeError("no optimizer config specified")
+        raise RuntimeError("invalid optimizer config")
