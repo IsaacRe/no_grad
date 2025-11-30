@@ -8,6 +8,8 @@ from typing import Optional, Union, Any
 import os
 import time
 
+from no_grad.optim import ESOptimizer
+
 
 def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
@@ -322,6 +324,10 @@ def _inner_training_loop(
                     if step % args.gradient_accumulation_steps == 0:
                         self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
 
+                    if isinstance(self.optimizer, ESOptimizer):
+                        # mutate model params
+                        self.optimizer.mutate()
+
                     # We explicitly want to avoid relying on `accelerator.accumulate` for generation training
                     context = (
                         functools.partial(self.accelerator.no_sync, model=model)
@@ -396,7 +402,11 @@ def _inner_training_loop(
                             context = implicit_replication
 
                         with context():
-                            self.optimizer.step()
+                            if isinstance(self.optimizer, ESOptimizer):
+                                # conduct reward step on current candidate
+                                self.optimizer.reward_step()
+                            else:
+                                self.optimizer.step()
 
                         self.control = self.callback_handler.on_optimizer_step(args, self.state, self.control)
 
@@ -515,7 +525,7 @@ def _inner_training_loop(
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
 
-def training_step(
+def training_step_no_backward(
         self,
         model: nn.Module,
         inputs: dict[str, Union[torch.Tensor, Any]],
@@ -605,10 +615,10 @@ def training_step(
                 if self.accelerator.distributed_type == DistributedType.DEEPSPEED:
                     kwargs["scale_wrt_gas"] = False
 
-                self.accelerator.backward(loss, **kwargs)
+                # self.accelerator.backward(loss, **kwargs)
 
             return loss.detach()
 
 
-Trainer.training_step = training_step
+Trainer.training_step = training_step_no_backward
 Trainer._inner_training_loop = _inner_training_loop

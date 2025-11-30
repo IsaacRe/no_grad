@@ -147,6 +147,27 @@ class ESOptimizer:
         if self.mutation_index > -1:
             self.aggregate_mutations()
 
+    @staticmethod
+    def from_torch_optim(optim: torch.optim.Optimizer, **kwargs) -> "ESOptimizer":
+        if isinstance(optim, torch.optim.SGD):
+            return ESOptimizer(
+                optim.param_groups[0]["params"],
+                lr=optim.param_groups[0]["lr"],
+                **kwargs,
+            )
+        elif isinstance(optim, torch.optim.AdamW):
+            return ESOptimizer(
+                optim.param_groups[0]["params"],
+                lr=optim.param_groups[0]["lr"],
+                use_adam=True,
+                betas=optim.param_groups[0]["betas"],
+                weight_decay=optim.param_groups[0]["weight_decay"],
+                epsilon=optim.param_groups[0]["eps"],
+                **kwargs,
+            )
+        else:
+            raise RuntimeError(f"conversion to ESOptimizer not supported for {type(optim)}")
+
     def _param_delta_iter(self, param_seeds: list[int] | None = None):
         if param_seeds is None:
             param_seeds = [None] * len(self.params)
