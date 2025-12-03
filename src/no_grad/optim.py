@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import math
 from tqdm.auto import tqdm
+import warnings
 
 
 @dataclass
@@ -85,28 +86,37 @@ class EvMutation:
     param_seeds: list[int] = field(default_factory=list)
     is_identity: bool = False
     reward: float | None = None
+    eval_count: int = 0
     
 
 class ESOptimizer:
 
     def __init__(
         self,
-        params: Iterable[nn.parameter.Parameter],
-        step_size=1e-5,
-        lr=1e-3,
-        population_size=64,
-        do_sample=False,
-        sample_temp=1.0,
-        include_parent=True,
-        persist_parent=True,
+        params: Iterable[nn.parameter.Parameter] = [],
+        step_size: float = 1e-5,
+        lr: float = 1e-3,
+        population_size: int = 64,
+        do_sample: bool = False,
+        sample_temp: float = 1.0,
+        include_parent: bool = True,
+        persist_parent: bool = True,
         use_adam: bool = False,
         betas: tuple = (0.9, 0.999),
         epsilon: float = 1e-8,
         weight_decay: float = 0.0,
         gamma: float = 1.0,
+        r_accum_steps: int = 1,
+        param_groups: list[dict] = [],
     ):
+        if not (param_groups or params):
+            raise ValueError("must provide either param_groups or params") 
+        self.param_groups = param_groups
+        self.r_accum_steps = r_accum_steps
         self.step = 0
-        self.params = list(params)
+        self.r_accum_step = 0
+        self.accum_r = 0  # accumulated reward
+        self.params = list(params) if params else param_groups[0]["params"]
         self.mutations: list[EvMutation] = []
         self.active_mutation: EvMutation | None = None
         self.population_size = population_size
@@ -127,6 +137,13 @@ class ESOptimizer:
             self.parent_params = [p.clone() for p in self.params]
             for p, p_parent in zip(self.params, self.parent_params):
                 p_parent.data = p.data
+        if param_groups:
+            # set params from first param group
+            self.lr = param_groups[0]["lr"]
+            if self.use_adam:
+                self.betas = param_groups[0]["betas"]
+                self.weight_decay = param_groups[0]["weight_decay"]
+                self.epsilon = param_groups[0]["eps"]
         if use_adam:
             # initialize first and second moments for each param
             self.exp_avg = [torch.zeros_like(p) for p in self.params]
@@ -147,22 +164,22 @@ class ESOptimizer:
         if self.mutation_index > -1:
             self.aggregate_mutations()
 
+    def _sync_lr(self):
+        if self.param_groups:
+            # sync learning rate with param group value (in case updated by external lr scheduler)
+            self.lr = self.param_groups[0]["lr"]
+
     @staticmethod
     def from_torch_optim(optim: torch.optim.Optimizer, **kwargs) -> "ESOptimizer":
         if isinstance(optim, torch.optim.SGD):
             return ESOptimizer(
-                optim.param_groups[0]["params"],
-                lr=optim.param_groups[0]["lr"],
+                param_groups=optim.param_groups,
                 **kwargs,
             )
         elif isinstance(optim, torch.optim.AdamW):
             return ESOptimizer(
-                optim.param_groups[0]["params"],
-                lr=optim.param_groups[0]["lr"],
                 use_adam=True,
-                betas=optim.param_groups[0]["betas"],
-                weight_decay=optim.param_groups[0]["weight_decay"],
-                epsilon=optim.param_groups[0]["eps"],
+                param_groups=optim.param_groups,
                 **kwargs,
             )
         else:
@@ -185,6 +202,12 @@ class ESOptimizer:
     @property
     def mutation_index(self):
         return len(self.mutations) - 1
+    
+    def _is_first_accum_step(self):
+        return self.r_accum_step == 0
+    
+    def _is_last_accum_step(self):
+        return self.r_accum_step == self.r_accum_steps - 1
 
     @torch.no_grad()
     def revert_mutation(self):
@@ -201,35 +224,53 @@ class ESOptimizer:
 
     @torch.no_grad()
     def mutate(self):
-        if self.include_parent and self.mutation_index == -1:
-            # save mutation to reference current unperturbed weights
-            new_mutation = EvMutation(is_identity=True)
-        else:
-            # make new mutation
-            param_seeds = []
-            for p, (delta_p, seed) in zip(self.params, self._param_delta_iter()):
-                if self.persist_parent:
-                    # can't use inplace if we have shared data ptr with current parent
-                    # instead we create a new tensor from applied delta and update ptr
-                    # of mutated weight to point to it
-                    p.data = p + delta_p
-                else:
-                    p += delta_p
-                param_seeds.append(seed)
-            new_mutation = EvMutation(param_seeds)
+        self._sync_lr() # sync lr before model forward pass
+        if self._is_first_accum_step():
+            if self.include_parent and self.mutation_index == -1:
+                # save mutation to reference current unperturbed weights
+                new_mutation = EvMutation(is_identity=True)
+            else:
+                # make new mutation
+                param_seeds = []
+                for p, (delta_p, seed) in zip(self.params, self._param_delta_iter()):
+                    if self.persist_parent:
+                        # can't use inplace if we have shared data ptr with current parent
+                        # instead we create a new tensor from applied delta and update ptr
+                        # of mutated weight to point to it
+                        p.data = p + delta_p
+                    else:
+                        p += delta_p
+                    param_seeds.append(seed)
+                new_mutation = EvMutation(param_seeds)
 
-        self.mutations.append(new_mutation)
-        self.active_mutation = new_mutation
+            new_mutation.reward = 0.0  # initialize for accumulation
+            self.mutations.append(new_mutation)
+            self.active_mutation = new_mutation
+
+    def is_batch_end(self):
+        return self._is_last_accum_step() and len(self.mutations) % self.population_size == 0
+
+    def is_batch_start(self):
+        return self._is_first_accum_step() and len(self.mutations) % self.population_size == 0
 
     def reward_step(self, reward: float):
-        self.active_mutation.reward = reward
-        self.revert_mutation()
+        # TODO handle uneven batches
+        self.active_mutation.reward += reward
+        self.active_mutation.eval_count += 1
 
-        if len(self.mutations) % self.population_size == 0:
-            self.aggregate_mutations()
-            self.lr_step()
+        if self._is_last_accum_step():
+            self.revert_mutation()
+            if self.is_batch_end():
+                self.aggregate_mutations()
+                self.lr_step()
 
-        self.step += 1
+        self.r_accum_step = (self.r_accum_step + 1) % self.r_accum_steps
+        if self.r_accum_step == 0:
+            self.step += 1
+
+    def state_dict(self):
+        # for torch optim compatibility
+        return {}
 
     @torch.no_grad()
     def aggregate_mutations(self):
@@ -239,7 +280,7 @@ class ESOptimizer:
         # print("aggregating mutations...", end="")
 
         if self.do_sample:
-            rewards = torch.tensor([m.reward for m in self.mutations])
+            rewards = torch.tensor([m.reward / m.eval_count for m in self.mutations])
             if self.sample_temp > 0:
                 probs = torch.softmax(rewards / self.sample_temp, dim=0)
                 sampled_index: int = torch.multinomial(probs, 1).item()
@@ -255,9 +296,10 @@ class ESOptimizer:
             # weighted avg mutations based on their reward z-score
             # all mutations should have reward set by now
             n = len(self.mutations)
-            mean_reward = sum(m.reward for m in self.mutations) / n
-            var_reward = sum((m.reward - mean_reward) ** 2 for m in self.mutations) / n
-            z_scores = [(m.reward - mean_reward) / (var_reward ** 0.5) for m in self.mutations if not m.is_identity]
+            rewards = [m.reward / m.eval_count for m in self.mutations]
+            mean_reward = sum(rewards) / n
+            var_reward = sum((r - mean_reward) ** 2 for r in rewards) / n
+            z_scores = [(r - mean_reward) / (var_reward ** 0.5) for r, m in zip(rewards, self.mutations) if not m.is_identity]
     
             if self.use_adam:
                 bc1 = 1 - self.betas[0] ** self.step
@@ -286,7 +328,10 @@ class ESOptimizer:
         # print("done")
 
     def lr_step(self):
-        self.lr *= self.gamma
+        if self.gamma != 1.0:
+            if self.param_groups:
+                warnings.warn("decayed learning rate will be overriden by param_group value")
+            self.lr *= self.gamma
 
 
 def get_optimizer(

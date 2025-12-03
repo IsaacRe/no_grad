@@ -1,4 +1,4 @@
-from transformers.trainer import Trainer, OptimizerNames, logger, is_torch_xpu_available, is_torch_mlu_available, is_torch_musa_available, is_torch_npu_available, is_torch_mps_available, is_torch_hpu_available, smp_forward_backward, tpu_spmd_dataloader, DebugOption, TrainerState, TRAINER_STATE_NAME, deepspeed_init, DebugUnderflowOverflow, TrainOutput, is_sagemaker_mp_enabled, unwrap_model, ExportableState, _is_peft_model, deepspeed_load_checkpoint, get_model_param_count, speed_metrics, skip_first_batches, DistributedType, is_torch_xla_available, xm, met, is_accelerate_available
+from transformers.trainer import Trainer, OptimizerNames, logger, is_torch_xpu_available, is_torch_mlu_available, is_torch_musa_available, is_torch_npu_available, is_torch_mps_available, is_torch_hpu_available, tpu_spmd_dataloader, DebugOption, TrainerState, TRAINER_STATE_NAME, deepspeed_init, DebugUnderflowOverflow, TrainOutput, is_sagemaker_mp_enabled, unwrap_model, ExportableState, _is_peft_model, deepspeed_load_checkpoint, get_model_param_count, speed_metrics, skip_first_batches, DistributedType, is_torch_xla_available, is_accelerate_available
 import shutil
 import torch.nn as nn
 import contextlib
@@ -7,6 +7,7 @@ import torch
 from typing import Optional, Union, Any
 import os
 import time
+import accelerate.optimizer
 
 from no_grad.optim import ESOptimizer
 
@@ -274,9 +275,13 @@ def _inner_training_loop(
                 remainder < args.gradient_accumulation_steps
             )
             for _ in range(total_updates):
-                update_step += 1
-                num_batches = args.gradient_accumulation_steps if update_step != (total_updates - 1) else remainder
-                batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, num_batches, args.device)
+                if isinstance(self.optimizer, ESOptimizer):
+                    assert self.optimizer._is_first_accum_step()
+                if not isinstance(self.optimizer, ESOptimizer) or self.optimizer.is_batch_end():
+                    # get next batch if starting new update
+                    update_step += 1
+                    num_batches = args.gradient_accumulation_steps if update_step != (total_updates - 1) else remainder
+                    batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, num_batches, args.device)
                 # Store the number of batches for current gradient accumulation
                 # This is used to correctly scale the loss when the last accumulation step has fewer batches
                 self.current_gradient_accumulation_steps = len(batch_samples)
@@ -324,6 +329,22 @@ def _inner_training_loop(
                     if step % args.gradient_accumulation_steps == 0:
                         self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
 
+                    if self.args.use_es and not isinstance(self.optimizer, ESOptimizer):
+                        if isinstance(self.optimizer, accelerate.optimizer.AcceleratedOptimizer):
+                            if self.optimizer.accelerator_state.distributed_type != DistributedType.NO:
+                                raise ValueError("ESOptimizer only supports non-distributed training.")
+                            self.optimizer = ESOptimizer.from_torch_optim(self.optimizer.optimizer,
+                                                                          r_accum_steps=self.args.gradient_accumulation_steps,
+                                                                          **self.args.es_args)
+                        else:
+                            self.optimizer = ESOptimizer.from_torch_optim(self.optimizer,
+                                                                          r_accum_steps=self.args.gradient_accumulation_steps,
+                                                                          **self.args.es_args)
+                        self.lr_scheduler.optimizer = self.optimizer
+
+                    if self.args.use_es and isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                        raise ValueError("ESOptimizer does not support ReduceLROnPlateau scheduler.")
+
                     if isinstance(self.optimizer, ESOptimizer):
                         # mutate model params
                         self.optimizer.mutate()
@@ -336,7 +357,9 @@ def _inner_training_loop(
                         else contextlib.nullcontext
                     )
                     with context():
-                        tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+                        grad_ctx = torch.no_grad() if self.args.use_es else contextlib.nullcontext
+                        with grad_ctx:
+                            tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
 
                     if (
                         args.logging_nan_inf_filter
@@ -395,17 +418,17 @@ def _inner_training_loop(
 
                         self.control = self.callback_handler.on_pre_optimizer_step(args, self.state, self.control)
 
-                        context = contextlib.nullcontext
-                        if self.is_tp_enabled:
-                            from torch.distributed._tensor.experimental import implicit_replication
+                        if isinstance(self.optimizer, ESOptimizer):
+                            # conduct reward step on current candidate
+                            self.optimizer.reward_step(tr_loss.item())
+                        else:
+                            context = contextlib.nullcontext
+                            if self.is_tp_enabled:
+                                from torch.distributed._tensor.experimental import implicit_replication
 
-                            context = implicit_replication
+                                context = implicit_replication
 
-                        with context():
-                            if isinstance(self.optimizer, ESOptimizer):
-                                # conduct reward step on current candidate
-                                self.optimizer.reward_step()
-                            else:
+                            with context():
                                 self.optimizer.step()
 
                         self.control = self.callback_handler.on_optimizer_step(args, self.state, self.control)
@@ -413,7 +436,13 @@ def _inner_training_loop(
                         # get leaning rate before update
                         learning_rate = self._get_learning_rate()
 
-                        if not self.accelerator.optimizer_step_was_skipped:
+                        if (
+                            not self.accelerator.optimizer_step_was_skipped and
+                            (
+                                not isinstance(self.lr_scheduler.optimizer, ESOptimizer) or
+                                self.lr_scheduler.optimizer.is_batch_end()
+                            )
+                        ):
                             # Delay optimizer scheduling until metrics are generated
                             if not isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                                 self.lr_scheduler.step()
@@ -433,6 +462,9 @@ def _inner_training_loop(
                             learning_rate=learning_rate,
                         )
                     else:
+                        if isinstance(self.optimizer, ESOptimizer):
+                            # conduct reward step on current candidate
+                            self.optimizer.reward_step(tr_loss.item())
                         self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
 
                     # PyTorch/XLA relies on the data loader to insert the mark_step for
@@ -619,6 +651,6 @@ def training_step_no_backward(
 
             return loss.detach()
 
-
-Trainer.training_step = training_step_no_backward
-Trainer._inner_training_loop = _inner_training_loop
+def apply_patch():
+    Trainer.training_step = training_step_no_backward
+    Trainer._inner_training_loop = _inner_training_loop
