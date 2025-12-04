@@ -98,7 +98,7 @@ class ESOptimizer:
         lr: float = 1e-3,
         population_size: int = 64,
         do_sample: bool = False,
-        sample_temp: float = 1.0,
+        sample_temp: float = 0.0,
         include_parent: bool = True,
         persist_parent: bool = True,
         use_adam: bool = False,
@@ -133,8 +133,9 @@ class ESOptimizer:
         self.parent_params = None
         self.gamma = gamma
         if persist_parent:
-            # create separate parameter list with shared data
-            self.parent_params = [p.clone() for p in self.params]
+            with torch.no_grad():
+                # create separate parameter list with shared data
+                self.parent_params = [p.clone() for p in self.params]
             for p, p_parent in zip(self.params, self.parent_params):
                 p_parent.data = p.data
         if param_groups:
@@ -258,6 +259,7 @@ class ESOptimizer:
         self.active_mutation.reward += reward
         self.active_mutation.eval_count += 1
 
+        print(f"{self.r_accum_step=}/{self.r_accum_steps-1}, {len(self.mutations)}/{self.population_size} mutations")
         if self._is_last_accum_step():
             self.revert_mutation()
             if self.is_batch_end():

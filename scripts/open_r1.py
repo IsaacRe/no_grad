@@ -29,20 +29,20 @@ SCHEDULER_KWARGS = {"min_lr_rate": 0.05}
 MAX_GRAD_NORM = 0.2
 WARMUP_STEPS = 0
 WARMUP_RATIO = 0.05
-REPORT_TO_WANDB = True
+REPORT_TO_WANDB = False
 PUSH_TO_HUB = False
-GRAD_ACCUM_STEPS = 32
-BATCH_SIZE = 2
+GRAD_ACCUM_STEPS = 1
+BATCH_SIZE = 16
 EPOCHS = 10
 USE_ES = True
 ES_ARGS = {
-    "population_size": 16,
-    "step_size": 1e-4,
+    "population_size": 4,
+    "step_size": 1e-5,
 }
 
 
 dataset = load_dataset(DATASET, "all",
-                       streaming=True)["train"].take(MAX_STEPS * GRAD_ACCUM_STEPS)
+                       streaming=True)["train"].take(MAX_STEPS * GRAD_ACCUM_STEPS * BATCH_SIZE)
 
 
 # SHAREGPT_ROLE_MAP = {

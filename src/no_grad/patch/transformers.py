@@ -237,6 +237,8 @@ def _inner_training_loop(
         if args.eval_on_start:
             self._evaluate(trial, ignore_keys_for_eval, skip_scheduler=True)
 
+        es_population_size = self.args.es_args.get("population_size", 16) if self.args.use_es else 1
+
         for epoch in range(epochs_trained, num_train_epochs):
             epoch_dataloader = train_dataloader
             if hasattr(epoch_dataloader, "set_epoch"):
@@ -250,7 +252,7 @@ def _inner_training_loop(
                 len(epoch_dataloader)
                 if len_dataloader is not None
                 else args.max_steps * args.gradient_accumulation_steps
-            )
+            ) * es_population_size
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
             step = -1
@@ -274,20 +276,27 @@ def _inner_training_loop(
             total_updates = steps_in_epoch // args.gradient_accumulation_steps + int(
                 remainder < args.gradient_accumulation_steps
             )
+            # need to process batch for each population member
+            total_updates *= es_population_size
+            min_loss = 1000
             for _ in range(total_updates):
                 if isinstance(self.optimizer, ESOptimizer):
                     assert self.optimizer._is_first_accum_step()
-                if not isinstance(self.optimizer, ESOptimizer) or self.optimizer.is_batch_end():
+                if not isinstance(self.optimizer, ESOptimizer) or self.optimizer.is_batch_start():
                     # get next batch if starting new update
                     update_step += 1
                     num_batches = args.gradient_accumulation_steps if update_step != (total_updates - 1) else remainder
                     batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, num_batches, args.device)
+                    min_loss = 1000
+                    # if len(batch_samples) > 0:
+                    #     print(f"New data:\n{batch_samples[0]['input_ids'][:4,2000:2008]}")
+                    #     print(sorted(self.get_batch_samples(iter(epoch_dataloader), 1, args.device)[0][0]['input_ids'][:,2000].cpu().numpy().tolist()))
                 # Store the number of batches for current gradient accumulation
                 # This is used to correctly scale the loss when the last accumulation step has fewer batches
                 self.current_gradient_accumulation_steps = len(batch_samples)
                 for i, inputs in enumerate(batch_samples):
                     step += 1
-                    do_sync_step = (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == steps_in_epoch
+                    do_sync_step = (step + 1) % (args.gradient_accumulation_steps * es_population_size) == 0 or (step + 1) == steps_in_epoch
                     # Since we perform prefetching, we need to manually set sync_gradients
                     self.accelerator.gradient_state._set_sync_gradients(do_sync_step)
 
@@ -361,6 +370,9 @@ def _inner_training_loop(
                         with grad_ctx:
                             tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
 
+                    min_loss = min(tr_loss_step.item(), min_loss)
+                    # print(f"Loss: {tr_loss_step.item()}")
+
                     if (
                         args.logging_nan_inf_filter
                         and not is_torch_xla_available()
@@ -420,7 +432,7 @@ def _inner_training_loop(
 
                         if isinstance(self.optimizer, ESOptimizer):
                             # conduct reward step on current candidate
-                            self.optimizer.reward_step(tr_loss.item())
+                            self.optimizer.reward_step(-tr_loss_step.item())
                         else:
                             context = contextlib.nullcontext
                             if self.is_tp_enabled:
@@ -447,12 +459,14 @@ def _inner_training_loop(
                             if not isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                                 self.lr_scheduler.step()
 
-                        model.zero_grad()
+                        if not self.args.use_es:
+                            model.zero_grad()
                         self.state.global_step += 1
                         self.state.epoch = epoch + (step + 1) / steps_in_epoch
                         self.control = self.callback_handler.on_step_end(args, self.state, self.control)
                         self._maybe_log_save_evaluate(
                             tr_loss,
+                            min_loss,
                             grad_norm,
                             model,
                             trial,
@@ -460,11 +474,12 @@ def _inner_training_loop(
                             ignore_keys_for_eval,
                             start_time,
                             learning_rate=learning_rate,
+                            es_population_size=es_population_size,
                         )
                     else:
                         if isinstance(self.optimizer, ESOptimizer):
                             # conduct reward step on current candidate
-                            self.optimizer.reward_step(tr_loss.item())
+                            self.optimizer.reward_step(-tr_loss_step.item())
                         self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
 
                     # PyTorch/XLA relies on the data loader to insert the mark_step for
@@ -489,7 +504,7 @@ def _inner_training_loop(
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
             self._maybe_log_save_evaluate(
-                tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=learning_rate
+                tr_loss, min_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=learning_rate, es_population_size=es_population_size
             )
 
             if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
@@ -651,6 +666,39 @@ def training_step_no_backward(
 
             return loss.detach()
 
+
+def _maybe_log_save_evaluate(
+        self, tr_loss, min_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=None, es_population_size=1,
+    ):
+        if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
+            if is_torch_xla_available():
+                xm.mark_step()
+
+            logs: dict[str, float] = {}
+
+            # all_gather + mean() to get average loss over all processes
+            tr_loss_scalar = self._nested_gather(tr_loss).mean().item()
+
+            # reset tr_loss to zero
+            tr_loss -= tr_loss  # literally why
+
+            logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged) / es_population_size, 4)
+            logs["min_loss"] = round(min_loss, 4)
+            if grad_norm is not None:
+                logs["grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+            if learning_rate is not None:
+                logs["learning_rate"] = learning_rate
+            else:
+                logs["learning_rate"] = self._get_learning_rate()
+
+            self._total_loss_scalar += tr_loss_scalar
+            self._globalstep_last_logged = self.state.global_step
+            self.store_flos()
+
+            self.log(logs, start_time)
+
+
 def apply_patch():
     Trainer.training_step = training_step_no_backward
     Trainer._inner_training_loop = _inner_training_loop
+    Trainer._maybe_log_save_evaluate = _maybe_log_save_evaluate
