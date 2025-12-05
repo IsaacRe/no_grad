@@ -79,7 +79,7 @@ class OptimizerConfig:
         elif cfg.type == "es_adam":
             lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
             ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
-            return f"es_adam-lr{cfg.es_adam.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
+            return f"es_adam-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
         else:
             return ""
 
@@ -305,6 +305,9 @@ class ESOptimizer:
             # all mutations should have reward set by now
             n = len(self.mutations)
             rewards = [m.reward / m.eval_count for m in self.mutations]
+            mean_reward = sum(rewards) / n
+            var_reward = sum((r - mean_reward) ** 2 for r in rewards) / n
+            z_scores = [(r - mean_reward) / (var_reward ** 0.5) for r, m in zip(rewards, self.mutations) if not m.is_identity]
 
             # record improved mutation count
             if self.include_parent:
@@ -318,10 +321,6 @@ class ESOptimizer:
                     if not m.is_identity
                 ) / (n - 1)
 
-            mean_reward = sum(rewards) / n
-            var_reward = sum((r - mean_reward) ** 2 for r in rewards) / n
-            z_scores = [(r - mean_reward) / (var_reward ** 0.5) for r, m in zip(rewards, self.mutations) if not m.is_identity]
-    
             if self.use_adam:
                 bc1 = 1 - self.betas[0] ** self.step
                 bc2 = 1 - self.betas[1] ** self.step

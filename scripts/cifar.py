@@ -30,6 +30,7 @@ class TrainConfig:
     cifar_path: str = "./data"
     es_updates_per_batch: int = 1
     optimizer_config: OptimizerConfig = field(default_factory=OptimizerConfig)
+    population_size: int = 1
     wandb_project_name: str = "no_grad-cifar"
     report_to_wandb: bool = False
 
@@ -273,7 +274,7 @@ def main():
                 train_loader,
                 optimizer,
                 val_loader=val_loader,
-                iters_per_batch=cfg.es_updates_per_batch * cfg.optimizer_config.es.population_size,
+                iters_per_batch=cfg.es_updates_per_batch * optimizer.population_size,
                 wandb_run=maybe_wandb_run,
             )
         else:
