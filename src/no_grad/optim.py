@@ -79,7 +79,7 @@ class OptimizerConfig:
         elif cfg.type == "es_adam":
             lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
             ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
-            return f"es_adam-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
+            return f"es_adam-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}-fix"
         else:
             return ""
 
@@ -273,8 +273,6 @@ class ESOptimizer:
                 self.lr_step()
 
         self.r_accum_step = (self.r_accum_step + 1) % self.r_accum_steps
-        if self.r_accum_step == 0:
-            self.step += 1
 
     def state_dict(self):
         # for torch optim compatibility
@@ -286,6 +284,7 @@ class ESOptimizer:
             raise RuntimeError("cannot aggregate while mutation is still active")
 
         # print("aggregating mutations...", end="")
+        self.step += 1
 
         if self.do_sample:
             rewards = torch.tensor([m.reward / m.eval_count for m in self.mutations])
