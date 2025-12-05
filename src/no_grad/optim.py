@@ -79,7 +79,11 @@ class OptimizerConfig:
         elif cfg.type == "es_adam":
             lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
             ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
-            return f"es_adam-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}-fix"
+            return f"es_adam-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
+        elif cfg.type == "adamutate":
+            lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
+            ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
+            return f"adamutate-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
         else:
             return ""
 
@@ -105,6 +109,7 @@ class ESOptimizer:
         include_parent: bool = True,
         persist_parent: bool = True,
         use_adam: bool = False,
+        ada_mutate: bool = False,  # whether to apply adam to mutation deltas
         betas: tuple = (0.9, 0.999),
         epsilon: float = 1e-8,
         weight_decay: float = 0.0,
@@ -117,7 +122,7 @@ class ESOptimizer:
             raise ValueError("must provide either param_groups or params") 
         self.param_groups = param_groups
         self.r_accum_steps = r_accum_steps
-        self.step = 0
+        self.step = 1
         self.r_accum_step = 0
         self.accum_r = 0  # accumulated reward
         self.params = list(params) if params else param_groups[0]["params"]
@@ -131,6 +136,7 @@ class ESOptimizer:
         self.include_parent = include_parent
         self.persist_parent = persist_parent
         self.use_adam = use_adam
+        self.ada_mutate = ada_mutate
         self.betas = betas
         self.weight_decay = weight_decay
         self.epsilon = epsilon
@@ -154,6 +160,9 @@ class ESOptimizer:
             # initialize first and second moments for each param
             self.exp_avg = [torch.zeros_like(p) for p in self.params]
             self.exp_avg_sq = [torch.zeros_like(p) for p in self.params]
+        elif ada_mutate:
+            self.exp_avg = [torch.ones_like(p) * step_size for p in self.params]
+            self.exp_avg_sq = [torch.ones_like(p) * (step_size ** 2) for p in self.params]
         self.aggregation_metrics = {}
 
     def __enter__(self):
@@ -197,14 +206,25 @@ class ESOptimizer:
             param_seeds = [None] * len(self.params)
         elif len(param_seeds) != len(self.params):
             raise RuntimeError("mismatch between number of params and seeds")
-        for p, seed in zip(self.params, param_seeds):
+        
+        if self.ada_mutate:
+            bc1 = 1 - self.betas[0] ** self.step
+            bc2 = 1 - self.betas[1] ** self.step
+
+        for i, (p, seed) in enumerate(zip(self.params, param_seeds)):
             # use cpu random number generator for stability
             if seed is None:
                 seed = torch.seed()
             else:
                 torch.manual_seed(seed)
-            
-            yield torch.randn(p.shape, dtype=p.dtype).to(p.device) * self.step_size, seed
+
+            if self.ada_mutate:
+                # scale mutation by adam moments
+                denominator = self.exp_avg_sq[i].sqrt() + self.epsilon
+                adapted_step = (math.sqrt(bc2) / bc1) * (self.exp_avg[i] / denominator)
+                yield torch.randn(p.shape, dtype=p.dtype).to(p.device) * adapted_step * self.step_size, seed
+            else:
+                yield torch.randn(p.shape, dtype=p.dtype).to(p.device) * self.step_size, seed
 
     @property
     def mutation_index(self):
@@ -284,7 +304,6 @@ class ESOptimizer:
             raise RuntimeError("cannot aggregate while mutation is still active")
 
         # print("aggregating mutations...", end="")
-        self.step += 1
 
         if self.do_sample:
             rewards = torch.tensor([m.reward / m.eval_count for m in self.mutations])
@@ -332,18 +351,20 @@ class ESOptimizer:
                 for p_delta, z in zip(p_deltas, z_scores):
                     agg_p_delta += p_delta * z / n / self.step_size
 
-                if self.use_adam:
+                if self.use_adam or self.ada_mutate:
                     # decay first and second moments
                     self.exp_avg[i] = self.betas[0] * self.exp_avg[i] + (1 - self.betas[0]) * agg_p_delta
                     self.exp_avg_sq[i] = self.betas[1] * self.exp_avg_sq[i] + (1 - self.betas[1]) * (agg_p_delta ** 2)
+                    
+                if self.use_adam:
                     denominator = self.exp_avg_sq[i].sqrt() + self.epsilon
                     step_size = self.lr * math.sqrt(bc2) / bc1
-
                     p += step_size * (self.exp_avg[i] / denominator - self.weight_decay * p)
                 else:
                     p += agg_p_delta * self.lr
 
         self.mutations = []
+        self.step += 1
         # print("done")
 
     def lr_step(self):
@@ -387,6 +408,25 @@ def get_optimizer(
             include_parent=config.es_adam.include_parent,
             persist_parent=config.es_adam.persist_parent,
             use_adam=True,
+            betas=config.es_adam.betas,
+            epsilon=config.es_adam.eps,
+            weight_decay=config.es_adam.weight_decay,
+            lr_gamma=config.es_adam.lr_gamma,
+            step_gamma=config.es_adam.step_gamma,
+        )
+    elif config.type == "adamutate":
+        sample_temp = (config.es_adam.agg_strategy.sample.temp if
+                       config.es_adam.agg_strategy.sample is not None else 1.0)
+        return ESOptimizer(
+            params,
+            step_size=config.es_adam.step_size,
+            lr=config.es_adam.lr,
+            population_size=config.es_adam.population_size,
+            do_sample=not config.es_adam.agg_strategy.weighted_sum,
+            sample_temp=sample_temp,
+            include_parent=config.es_adam.include_parent,
+            persist_parent=config.es_adam.persist_parent,
+            ada_mutate=True,
             betas=config.es_adam.betas,
             epsilon=config.es_adam.eps,
             weight_decay=config.es_adam.weight_decay,
