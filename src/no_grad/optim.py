@@ -154,6 +154,7 @@ class ESOptimizer:
             # initialize first and second moments for each param
             self.exp_avg = [torch.zeros_like(p) for p in self.params]
             self.exp_avg_sq = [torch.zeros_like(p) for p in self.params]
+        self.aggregation_metrics = {}
 
     def __enter__(self):
         return self
@@ -304,6 +305,19 @@ class ESOptimizer:
             # all mutations should have reward set by now
             n = len(self.mutations)
             rewards = [m.reward / m.eval_count for m in self.mutations]
+
+            # record improved mutation count
+            if self.include_parent:
+                # first mutation is identity (parent)
+                self.aggregation_metrics["improved_ratio"] = sum(
+                    1 for r, m in zip(rewards, self.mutations)
+                    if (not m.is_identity) and r > rewards[0]
+                ) / (n - 1)
+                self.aggregation_metrics["relative_fitness"] = sum(
+                    (r - rewards[0]) / abs(mean_reward) for r, m in zip(rewards, self.mutations)
+                    if not m.is_identity
+                ) / (n - 1)
+
             mean_reward = sum(rewards) / n
             var_reward = sum((r - mean_reward) ** 2 for r in rewards) / n
             z_scores = [(r - mean_reward) / (var_reward ** 0.5) for r, m in zip(rewards, self.mutations) if not m.is_identity]

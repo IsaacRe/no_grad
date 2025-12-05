@@ -227,6 +227,8 @@ def train_es(
                     vals = {k: v for k, v in zip([m[0] for m in log_metrics], log_vals)}
                     # track forward pass count
                     vals["forwards"] = step_count * optimizer.population_size
+                    vals["step_size"] = optimizer.step_size
+                    vals.update(optimizer.aggregation_metrics)
                     wandb_run.log(vals)
 
             if use_tqdm:
