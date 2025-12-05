@@ -83,7 +83,7 @@ class OptimizerConfig:
         elif cfg.type == "adamutate":
             lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
             ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
-            return f"adamutate-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
+            return f"adamutate_v3-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
         else:
             return ""
 
@@ -156,13 +156,13 @@ class ESOptimizer:
                 self.betas = param_groups[0]["betas"]
                 self.weight_decay = param_groups[0]["weight_decay"]
                 self.epsilon = param_groups[0]["eps"]
-        if use_adam:
+        if use_adam or ada_mutate:
             # initialize first and second moments for each param
             self.exp_avg = [torch.zeros_like(p) for p in self.params]
             self.exp_avg_sq = [torch.zeros_like(p) for p in self.params]
-        elif ada_mutate:
-            self.exp_avg = [torch.ones_like(p) * step_size for p in self.params]
-            self.exp_avg_sq = [torch.ones_like(p) * (step_size ** 2) for p in self.params]
+        # elif ada_mutate:
+        #     self.exp_avg = [torch.ones_like(p) * step_size for p in self.params]
+        #     self.exp_avg_sq = [torch.ones_like(p) * (step_size ** 2) for p in self.params]
         self.aggregation_metrics = {}
 
     def __enter__(self):
@@ -220,8 +220,9 @@ class ESOptimizer:
 
             if self.ada_mutate:
                 # scale mutation by adam moments
+                numerator = self.exp_avg[i] + self.epsilon
                 denominator = self.exp_avg_sq[i].sqrt() + self.epsilon
-                adapted_step = (math.sqrt(bc2) / bc1) * (self.exp_avg[i] / denominator)
+                adapted_step = (math.sqrt(bc2) / bc1) * (numerator / denominator)
                 yield torch.randn(p.shape, dtype=p.dtype).to(p.device) * adapted_step * self.step_size, seed
             else:
                 yield torch.randn(p.shape, dtype=p.dtype).to(p.device) * self.step_size, seed
@@ -427,6 +428,7 @@ def get_optimizer(
             include_parent=config.es_adam.include_parent,
             persist_parent=config.es_adam.persist_parent,
             ada_mutate=True,
+            use_adam=True,
             betas=config.es_adam.betas,
             epsilon=config.es_adam.eps,
             weight_decay=config.es_adam.weight_decay,
