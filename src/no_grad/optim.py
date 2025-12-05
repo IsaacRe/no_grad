@@ -11,6 +11,7 @@ import warnings
 class OptimizerParams:
     lr: float = 1e-3
     lr_gamma: float = 1.0  # no lr decay
+    step_gamma: float = 1.0  # no step size decay
 
 
 @dataclass
@@ -70,13 +71,15 @@ class OptimizerConfig:
             if not cfg.es.agg_strategy.weighted_sum:
                 return f"es-sample_t{cfg.es.agg_strategy.sample.temp}-p{cfg.es.population_size}-s{cfg.es.step_size}"
             else:
-                gamma = f"-gamma{cfg.es.lr_gamma}" if cfg.es.lr_gamma != 1.0 else ""
-                return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}{gamma}"
+                lr_gamma = f"-lr_gamma{cfg.es.lr_gamma}" if cfg.es.lr_gamma != 1.0 else ""
+                ss_gamma = f"-ss_gamma{cfg.es.step_gamma}" if cfg.es.step_gamma != 1.0 else ""
+                return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}{lr_gamma}{ss_gamma}"
         elif cfg.type == "adam":
             return f"adam-lr{cfg.adam.lr}-b{cfg.adam.betas[0]}_{cfg.adam.betas[1]}-w{cfg.adam.weight_decay}-e{cfg.adam.eps}"
         elif cfg.type == "es_adam":
-            gamma = f"-gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
-            return f"es_adam-lr{cfg.es_adam.lr}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{gamma}"
+            lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
+            ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
+            return f"es_adam-lr{cfg.es_adam.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
         else:
             return ""
 
@@ -105,7 +108,8 @@ class ESOptimizer:
         betas: tuple = (0.9, 0.999),
         epsilon: float = 1e-8,
         weight_decay: float = 0.0,
-        gamma: float = 1.0,
+        lr_gamma: float = 1.0,
+        step_gamma: float = 1.0,
         r_accum_steps: int = 1,
         param_groups: list[dict] = [],
     ):
@@ -131,7 +135,8 @@ class ESOptimizer:
         self.weight_decay = weight_decay
         self.epsilon = epsilon
         self.parent_params = None
-        self.gamma = gamma
+        self.lr_gamma = lr_gamma
+        self.step_gamma = step_gamma
         if persist_parent:
             with torch.no_grad():
                 # create separate parameter list with shared data
@@ -259,7 +264,7 @@ class ESOptimizer:
         self.active_mutation.reward += reward
         self.active_mutation.eval_count += 1
 
-        print(f"{self.r_accum_step=}/{self.r_accum_steps-1}, {len(self.mutations)}/{self.population_size} mutations")
+        # print(f"{self.r_accum_step=}/{self.r_accum_steps-1}, {len(self.mutations)}/{self.population_size} mutations")
         if self._is_last_accum_step():
             self.revert_mutation()
             if self.is_batch_end():
@@ -330,10 +335,12 @@ class ESOptimizer:
         # print("done")
 
     def lr_step(self):
-        if self.gamma != 1.0:
+        if self.lr_gamma != 1.0:
             if self.param_groups:
                 warnings.warn("decayed learning rate will be overriden by param_group value")
-            self.lr *= self.gamma
+            self.lr *= self.lr_gamma
+        if self.step_gamma != 1.0:
+            self.step_size *= self.step_gamma
 
 
 def get_optimizer(
@@ -352,7 +359,8 @@ def get_optimizer(
             sample_temp=sample_temp,
             include_parent=config.es.include_parent,
             persist_parent=config.es.persist_parent,
-            gamma=config.es.lr_gamma,
+            lr_gamma=config.es.lr_gamma,
+            step_gamma=config.es.step_gamma,
         )
     elif config.type == "es_adam":
         sample_temp = (config.es_adam.agg_strategy.sample.temp if
@@ -370,7 +378,8 @@ def get_optimizer(
             betas=config.es_adam.betas,
             epsilon=config.es_adam.eps,
             weight_decay=config.es_adam.weight_decay,
-            gamma=config.es_adam.lr_gamma,
+            lr_gamma=config.es_adam.lr_gamma,
+            step_gamma=config.es_adam.step_gamma,
         )
     elif config.type == "sgd":
         return torch.optim.SGD(
