@@ -8,6 +8,8 @@ from peft import LoraConfig
 import torch
 import os
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from no_grad.patch.transformers import apply_patch
 
 apply_patch()
@@ -16,7 +18,7 @@ MODEL_NAME = "R1-Distill-Llama-8B-Hard-r1024-MoT"
 RUN_ID = "ES"
 MODEL = "qwen/Qwen3-0.6B"
 DATASET = "open-r1/Mixture-of-Thoughts"
-MAX_STEPS = 1 #16_000
+MAX_STEPS = int(os.getenv("MAX_STEPS", "1")) #16_000
 MAX_LENGTH = 17_000
 LORA_RANK = 1024
 LORA_ALPHA = 1024
@@ -33,7 +35,7 @@ WARMUP_RATIO = 0.05
 REPORT_TO_WANDB = True
 PUSH_TO_HUB = False
 GRAD_ACCUM_STEPS = int(os.getenv("ACCUM_STEPS", "1"))
-BATCH_SIZE = 16  # original batch size was 128
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16")) # original batch size was 128
 EPOCHS = 100
 USE_ES = True
 ES_ARGS = {
@@ -41,7 +43,7 @@ ES_ARGS = {
     "step_size": float(os.getenv("ES_STEP_SIZE", "2e-5")),
 }
 RUN_ID += f"lr-{LR}-p{ES_ARGS['population_size']}-s{ES_ARGS['step_size']}"
-MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-single_batch-lr{LR}-acc{GRAD_ACCUM_STEPS}-steps{MAX_STEPS}"
+MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-s{ES_ARGS['step_size']}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-p{ES_ARGS['population_size']}-no_adam-sb_sweep"
 DO_SAVE = False
 
 dataset = load_dataset(DATASET, "all",
@@ -116,6 +118,7 @@ training_args = SFTConfig(
     hub_revision=RUN_ID,
     hub_private_repo=True,
     num_train_epochs=EPOCHS,
+    optim="sgd",
 )
 
 training_args.use_es = USE_ES
