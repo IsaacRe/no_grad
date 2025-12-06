@@ -6,6 +6,7 @@ from transformers import (
 from datasets import load_dataset, Dataset
 from peft import LoraConfig
 import torch
+import os
 
 from no_grad.patch.transformers import apply_patch
 
@@ -15,7 +16,7 @@ MODEL_NAME = "R1-Distill-Llama-8B-Hard-r1024-MoT"
 RUN_ID = "ES"
 MODEL = "qwen/Qwen3-0.6B"
 DATASET = "open-r1/Mixture-of-Thoughts"
-MAX_STEPS = 1 #16_000
+MAX_STEPS = 1000 #16_000
 MAX_LENGTH = 17_000
 LORA_RANK = 1024
 LORA_ALPHA = 1024
@@ -29,17 +30,19 @@ SCHEDULER_KWARGS = {"min_lr_rate": 0.05}
 MAX_GRAD_NORM = 0.2
 WARMUP_STEPS = 0
 WARMUP_RATIO = 0.05
-REPORT_TO_WANDB = False
+REPORT_TO_WANDB = True
 PUSH_TO_HUB = False
-GRAD_ACCUM_STEPS = 1
-BATCH_SIZE = 16
-EPOCHS = 10
+GRAD_ACCUM_STEPS = int(os.getenv("ACCUM_STEPS", "1"))
+BATCH_SIZE = 16  # original batch size was 128
+EPOCHS = 1
 USE_ES = True
 ES_ARGS = {
-    "population_size": 4,
-    "step_size": 1e-5,
+    "population_size": int(os.getenv("ES_POPULATION_SIZE", "8")),
+    "step_size": float(os.getenv("ES_STEP_SIZE", "2e-5")),
 }
-
+RUN_ID += f"lr-{LR}-p{ES_ARGS['population_size']}-s{ES_ARGS['step_size']}"
+MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-b{BATCH_SIZE * GRAD_ACCUM_STEPS}-p{ES_ARGS['population_size']}-s{ES_ARGS['step_size']}"
+DO_SAVE = False
 
 dataset = load_dataset(DATASET, "all",
                        streaming=True)["train"].take(MAX_STEPS * GRAD_ACCUM_STEPS * BATCH_SIZE)
@@ -95,6 +98,7 @@ training_args = SFTConfig(
     dataloader_num_workers=16,
     logging_steps=LOGGING_STEPS,
     save_steps=SAVE_STEPS,
+    save_strategy="steps" if DO_SAVE else "no",
     overwrite_output_dir=True,
     use_liger_kernel=True,
     gradient_accumulation_steps=GRAD_ACCUM_STEPS,
