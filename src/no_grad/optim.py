@@ -269,6 +269,9 @@ class ESOptimizer:
         if self._is_last_accum_step():
             self.revert_mutation()
             if self.is_batch_end():
+                print(f"mutation rewards: {[m.reward / m.eval_count for m in self.mutations]}")
+                print(f"mutation r counts: {[m.eval_count for m in self.mutations]}")
+
                 self.aggregate_mutations()
                 self.lr_step()
 

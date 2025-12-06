@@ -279,6 +279,7 @@ def _inner_training_loop(
             # need to process batch for each population member
             total_updates *= es_population_size
             min_loss = 1000
+            current_mutation_loss = 0.0
             for _ in range(total_updates):
                 if isinstance(self.optimizer, ESOptimizer):
                     assert self.optimizer._is_first_accum_step()
@@ -370,8 +371,12 @@ def _inner_training_loop(
                         with grad_ctx:
                             tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
 
-                    min_loss = min(tr_loss_step.item(), min_loss)
-                    # print(f"Loss: {tr_loss_step.item()}")
+                    current_mutation_loss += tr_loss_step.item()
+                    normalized_loss = tr_loss_step.item() * self.current_gradient_accumulation_steps
+                    if self.optimizer._is_last_accum_step():
+                        min_loss = min(current_mutation_loss, min_loss)
+                        current_mutation_loss = 0.0
+                        # print(f"Loss: {tr_loss_step.item()}")
 
                     if (
                         args.logging_nan_inf_filter
@@ -388,6 +393,9 @@ def _inner_training_loop(
                         tr_loss = tr_loss + tr_loss_step
 
                     self.current_flos += float(self.floating_point_ops(inputs))
+
+                    if self.optimizer._is_last_accum_step():
+                        print(f"finished for mutation {len(self.optimizer.mutations)-1}/{self.optimizer.population_size}")
 
                     if do_sync_step:
                         # Since we perform prefetching, we need to manually set sync_gradients to True
@@ -430,9 +438,11 @@ def _inner_training_loop(
 
                         self.control = self.callback_handler.on_pre_optimizer_step(args, self.state, self.control)
 
+                        print(f'reward step last_accum={self.optimizer._is_last_accum_step()}, m_idx={len(self.optimizer.mutations)}, last_m={len(self.optimizer.mutations) % self.optimizer.population_size == 0}')
+
                         if isinstance(self.optimizer, ESOptimizer):
                             # conduct reward step on current candidate
-                            self.optimizer.reward_step(-tr_loss_step.item())
+                            self.optimizer.reward_step(-normalized_loss)
                         else:
                             context = contextlib.nullcontext
                             if self.is_tp_enabled:
@@ -452,7 +462,7 @@ def _inner_training_loop(
                             not self.accelerator.optimizer_step_was_skipped and
                             (
                                 not isinstance(self.lr_scheduler.optimizer, ESOptimizer) or
-                                self.lr_scheduler.optimizer.is_batch_end()
+                                self.lr_scheduler.optimizer.is_batch_start()  # step will be reset after reward_step
                             )
                         ):
                             # Delay optimizer scheduling until metrics are generated
@@ -477,9 +487,10 @@ def _inner_training_loop(
                             es_population_size=es_population_size,
                         )
                     else:
+                        print(f'non-reward step last_accum={self.optimizer._is_last_accum_step()}, m_idx={len(self.optimizer.mutations)}, last_m={len(self.optimizer.mutations) % self.optimizer.population_size == 0}')
                         if isinstance(self.optimizer, ESOptimizer):
                             # conduct reward step on current candidate
-                            self.optimizer.reward_step(-tr_loss_step.item())
+                            self.optimizer.reward_step(-normalized_loss)
                         self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
 
                     # PyTorch/XLA relies on the data loader to insert the mark_step for
