@@ -29,20 +29,25 @@ SCHEDULER_KWARGS = {"min_lr_rate": 0.05}
 MAX_GRAD_NORM = 0.2
 WARMUP_STEPS = 0
 WARMUP_RATIO = 0.05
-REPORT_TO_WANDB = True
+REPORT_TO_WANDB = bool(int(os.getenv("REPORT_TO_WANDB", "0")))
 PUSH_TO_HUB = False
 GRAD_ACCUM_STEPS = int(os.getenv("ACCUM_STEPS", "1"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16")) # original batch size was 128
 EPOCHS = 1
-USE_ES = False
+USE_ES = bool(int(os.getenv("USE_ES", "0")))
 ES_ARGS = {
     "population_size": int(os.getenv("ES_POPULATION_SIZE", "8")),
     "step_size": float(os.getenv("ES_STEP_SIZE", "2e-5")),
 }
-OPTIMIZER = "adamw_torch"  # "sgd"
+OPTIMIZER = os.getenv("OPTIMIZER", "adamw_torch")  # "sgd"
 ADAM_BETAS = [float(b) for b in os.getenv("ADAM_BETAS", "0.9,0.999").split(",")]
-# MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-s{ES_ARGS['step_size']}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-p{ES_ARGS['population_size']}-no_adam-vb_sweep-base"
-MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-B{ADAM_BETAS[0]}_{ADAM_BETAS[1]}-sgd_adam-vb_sweep-base"
+if USE_ES:
+    if OPTIMIZER == "adamw_torch":
+        MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-s{ES_ARGS['step_size']}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-p{ES_ARGS['population_size']}-B{ADAM_BETAS[0]}_{ADAM_BETAS[1]}-es_adam-vb_sweep-base"
+    else:
+        MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-s{ES_ARGS['step_size']}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-p{ES_ARGS['population_size']}-no_adam-vb_sweep-base"
+else:
+    MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-B{ADAM_BETAS[0]}_{ADAM_BETAS[1]}-sgd_adam-vb_sweep-base"
 RUN_ID = MODEL_NAME
 DO_SAVE = False
 
