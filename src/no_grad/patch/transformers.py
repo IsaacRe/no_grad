@@ -367,13 +367,15 @@ def _inner_training_loop(
                         else contextlib.nullcontext
                     )
                     with context():
-                        grad_ctx = torch.no_grad() if self.args.use_es else contextlib.nullcontext
-                        with grad_ctx:
+                        if self.args.use_es:
+                            with torch.no_grad():
+                                tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+                        else:
                             tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
 
                     current_mutation_loss += tr_loss_step.item()
                     normalized_loss = tr_loss_step.item() * self.current_gradient_accumulation_steps
-                    if self.optimizer._is_last_accum_step():
+                    if isinstance(self.optimizer, ESOptimizer) and self.optimizer._is_last_accum_step():
                         min_loss = min(current_mutation_loss, min_loss)
                         current_mutation_loss = 0.0
                         # print(f"Loss: {tr_loss_step.item()}")
@@ -394,7 +396,7 @@ def _inner_training_loop(
 
                     self.current_flos += float(self.floating_point_ops(inputs))
 
-                    if self.optimizer._is_last_accum_step():
+                    if isinstance(self.optimizer, ESOptimizer) and self.optimizer._is_last_accum_step():
                         print(f"finished for mutation {len(self.optimizer.mutations)-1}/{self.optimizer.population_size}")
 
                     if do_sync_step:
@@ -438,7 +440,8 @@ def _inner_training_loop(
 
                         self.control = self.callback_handler.on_pre_optimizer_step(args, self.state, self.control)
 
-                        print(f'reward step last_accum={self.optimizer._is_last_accum_step()}, m_idx={len(self.optimizer.mutations)}, last_m={len(self.optimizer.mutations) % self.optimizer.population_size == 0}')
+                        if isinstance(self.optimizer, ESOptimizer):
+                            print(f'reward step last_accum={self.optimizer._is_last_accum_step()}, m_idx={len(self.optimizer.mutations)}, last_m={len(self.optimizer.mutations) % self.optimizer.population_size == 0}')
 
                         if isinstance(self.optimizer, ESOptimizer):
                             # conduct reward step on current candidate
@@ -487,8 +490,8 @@ def _inner_training_loop(
                             es_population_size=es_population_size,
                         )
                     else:
-                        print(f'non-reward step last_accum={self.optimizer._is_last_accum_step()}, m_idx={len(self.optimizer.mutations)}, last_m={len(self.optimizer.mutations) % self.optimizer.population_size == 0}')
                         if isinstance(self.optimizer, ESOptimizer):
+                            print(f'non-reward step last_accum={self.optimizer._is_last_accum_step()}, m_idx={len(self.optimizer.mutations)}, last_m={len(self.optimizer.mutations) % self.optimizer.population_size == 0}')
                             # conduct reward step on current candidate
                             self.optimizer.reward_step(-normalized_loss)
                         self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
@@ -673,7 +676,8 @@ def training_step_no_backward(
                 if self.accelerator.distributed_type == DistributedType.DEEPSPEED:
                     kwargs["scale_wrt_gas"] = False
 
-                # self.accelerator.backward(loss, **kwargs)
+                if not self.args.use_es:
+                    self.accelerator.backward(loss, **kwargs)
 
             return loss.detach()
 

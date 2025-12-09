@@ -12,10 +12,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from no_grad.patch.transformers import apply_patch
 
-apply_patch()
-
 MODEL_NAME = "R1-Distill-Llama-8B-Hard-r1024-MoT"
-RUN_ID = "ES"
 MODEL = "qwen/Qwen3-0.6B-Base"
 DATASET = "open-r1/Mixture-of-Thoughts"
 MAX_STEPS = int(os.getenv("MAX_STEPS", "1")) #16_000
@@ -37,14 +34,21 @@ PUSH_TO_HUB = False
 GRAD_ACCUM_STEPS = int(os.getenv("ACCUM_STEPS", "1"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16")) # original batch size was 128
 EPOCHS = 1
-USE_ES = True
+USE_ES = False
 ES_ARGS = {
     "population_size": int(os.getenv("ES_POPULATION_SIZE", "8")),
     "step_size": float(os.getenv("ES_STEP_SIZE", "2e-5")),
 }
-RUN_ID += f"lr-{LR}-p{ES_ARGS['population_size']}-s{ES_ARGS['step_size']}"
-MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-s{ES_ARGS['step_size']}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-p{ES_ARGS['population_size']}-no_adam-vb_sweep-base"
+OPTIMIZER = "adamw_torch"  # "sgd"
+ADAM_BETAS = [float(b) for b in os.getenv("ADAM_BETAS", "0.9,0.999").split(",")]
+# MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-s{ES_ARGS['step_size']}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-p{ES_ARGS['population_size']}-no_adam-vb_sweep-base"
+MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-B{ADAM_BETAS[0]}_{ADAM_BETAS[1]}-sgd_adam-vb_sweep-base"
+RUN_ID = MODEL_NAME
 DO_SAVE = False
+
+if USE_ES:
+    apply_patch()
+
 
 dataset = load_dataset(DATASET, "all",
                        streaming=True)["train"].take(MAX_STEPS * GRAD_ACCUM_STEPS * BATCH_SIZE)
@@ -118,7 +122,9 @@ training_args = SFTConfig(
     hub_revision=RUN_ID,
     hub_private_repo=True,
     num_train_epochs=EPOCHS,
-    optim="sgd",
+    optim=OPTIMIZER,
+    adam_beta1=ADAM_BETAS[0],
+    adam_beta2=ADAM_BETAS[1],
 )
 
 training_args.use_es = USE_ES
