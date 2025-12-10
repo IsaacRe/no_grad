@@ -17,8 +17,8 @@ MODEL = "qwen/Qwen3-0.6B-Base"
 DATASET = "open-r1/Mixture-of-Thoughts"
 MAX_STEPS = int(os.getenv("MAX_STEPS", "1")) #16_000
 MAX_LENGTH = 17_000
-LORA_RANK = 1024
-LORA_ALPHA = 1024
+LORA_RANK = int(os.getenv("LORA_RANK", "1024"))
+LORA_ALPHA = int(os.getenv("LORA_ALPHA", str(LORA_RANK)))
 USE_RSLORA = True
 DEEPSPEED = None
 LOGGING_STEPS = 1
@@ -43,11 +43,11 @@ OPTIMIZER = os.getenv("OPTIMIZER", "adamw_torch")  # "sgd"
 ADAM_BETAS = [float(b) for b in os.getenv("ADAM_BETAS", "0.9,0.999").split(",")]
 if USE_ES:
     if OPTIMIZER == "adamw_torch":
-        MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-s{ES_ARGS['step_size']}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-p{ES_ARGS['population_size']}-B{ADAM_BETAS[0]}_{ADAM_BETAS[1]}-es_adam-decay_s"
+        MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-s{ES_ARGS['step_size']}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-p{ES_ARGS['population_size']}-B{ADAM_BETAS[0]}_{ADAM_BETAS[1]}-r{LORA_RANK}{'a' + str(LORA_ALPHA) if LORA_ALPHA != LORA_RANK else ''}-es_adam-decay_s"
     else:
-        MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-s{ES_ARGS['step_size']}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-p{ES_ARGS['population_size']}-no_adam-decay_s"
+        MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-s{ES_ARGS['step_size']}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-p{ES_ARGS['population_size']}-r{LORA_RANK}{'a' + str(LORA_ALPHA) if LORA_ALPHA != LORA_RANK else ''}-no_adam-decay_s"
 else:
-    MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-B{ADAM_BETAS[0]}_{ADAM_BETAS[1]}-sgd_adam"
+    MODEL_NAME = f"R1-Distill-Llama-8B-Hard-r1024-MoT-lr{LR}-b{GRAD_ACCUM_STEPS * BATCH_SIZE}-B{ADAM_BETAS[0]}_{ADAM_BETAS[1]}-r{LORA_RANK}{'a' + str(LORA_ALPHA) if LORA_ALPHA != LORA_RANK else ''}-sgd_adam"
 RUN_ID = MODEL_NAME
 DO_SAVE = False
 
