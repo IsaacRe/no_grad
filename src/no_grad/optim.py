@@ -83,7 +83,7 @@ class OptimizerConfig:
         elif cfg.type == "adamutate":
             lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
             ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
-            return f"adamutate_v3-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
+            return f"adamutate_v4-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
         else:
             return ""
 
@@ -222,8 +222,13 @@ class ESOptimizer:
                 # scale mutation by adam moments
                 numerator = self.exp_avg[i] + self.epsilon
                 denominator = self.exp_avg_sq[i].sqrt() + self.epsilon
-                adapted_step = (math.sqrt(bc2) / bc1) * (numerator / denominator)
-                yield torch.randn(p.shape, dtype=p.dtype).to(p.device) * adapted_step * self.step_size, seed
+                # adapted_step = (math.sqrt(bc2) / bc1) * (numerator / denominator)
+                yield (
+                    (torch.randn(p.shape, dtype=p.dtype).to(p.device) + numerator)
+                    * math.sqrt(bc2) / bc1
+                    / denominator
+                    * self.step_size
+                ), seed
             else:
                 yield torch.randn(p.shape, dtype=p.dtype).to(p.device) * self.step_size, seed
 
