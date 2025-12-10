@@ -83,7 +83,7 @@ class OptimizerConfig:
         elif cfg.type == "adamutate":
             lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
             ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
-            return f"adamutate_v4-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
+            return f"adamutate_v5-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
         else:
             return ""
 
@@ -433,7 +433,7 @@ def get_optimizer(
             include_parent=config.es_adam.include_parent,
             persist_parent=config.es_adam.persist_parent,
             ada_mutate=True,
-            use_adam=True,
+            use_adam=False,
             betas=config.es_adam.betas,
             epsilon=config.es_adam.eps,
             weight_decay=config.es_adam.weight_decay,
