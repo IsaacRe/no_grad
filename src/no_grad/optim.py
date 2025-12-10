@@ -146,6 +146,7 @@ class ESOptimizer:
         if param_groups:
             # set params from first param group
             self.lr = param_groups[0]["lr"]
+            self.step_size = max(self.lr, self.epsilon)  # decay step size as well
             if self.use_adam:
                 self.betas = param_groups[0]["betas"]
                 self.weight_decay = param_groups[0]["weight_decay"]
@@ -175,6 +176,7 @@ class ESOptimizer:
         if self.param_groups:
             # sync learning rate with param group value (in case updated by external lr scheduler)
             self.lr = self.param_groups[0]["lr"]
+            self.step_size = max(self.lr, self.epsilon)  # decay step size as well
 
     @staticmethod
     def from_torch_optim(optim: torch.optim.Optimizer, **kwargs) -> "ESOptimizer":
