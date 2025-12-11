@@ -83,7 +83,7 @@ class OptimizerConfig:
         elif cfg.type == "adamutate":
             lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
             ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
-            return f"adamutate_v5-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
+            return f"adamutate_v6-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
         else:
             return ""
 
@@ -159,7 +159,10 @@ class ESOptimizer:
         if use_adam or ada_mutate:
             # initialize first and second moments for each param
             self.exp_avg = [torch.zeros_like(p) for p in self.params]
-            self.exp_avg_sq = [torch.zeros_like(p) for p in self.params]
+            if use_adam:
+                self.exp_avg_sq = [torch.zeros_like(p) for p in self.params]
+            else:
+                self.exp_avg_sq = [torch.ones_like(p) * step_size ** 2 for p in self.params]
         # elif ada_mutate:
         #     self.exp_avg = [torch.ones_like(p) * step_size for p in self.params]
         #     self.exp_avg_sq = [torch.ones_like(p) * (step_size ** 2) for p in self.params]
@@ -219,15 +222,15 @@ class ESOptimizer:
                 torch.manual_seed(seed)
 
             if self.ada_mutate:
+                correction = math.sqrt(bc2) / bc1
                 # scale mutation by adam moments
-                numerator = self.exp_avg[i] + self.epsilon
-                denominator = self.exp_avg_sq[i].sqrt() + self.epsilon
-                # adapted_step = (math.sqrt(bc2) / bc1) * (numerator / denominator)
+                scale = self.exp_avg_sq[i].sqrt()
+                step = self.exp_avg[i] / (scale + self.epsilon) * correction
+                step *= self.lr  # scale update during mutation or during aggregation? probably doesnt matter much
+                # if i == 0 and len(self.mutations) == 1:
+                #     import pdb; pdb.set_trace()
                 yield (
-                    (torch.randn(p.shape, dtype=p.dtype).to(p.device) + numerator)
-                    * math.sqrt(bc2) / bc1
-                    / denominator
-                    * self.step_size
+                    torch.randn(p.shape, dtype=p.dtype).to(p.device) * scale + step
                 ), seed
             else:
                 yield torch.randn(p.shape, dtype=p.dtype).to(p.device) * self.step_size, seed
@@ -355,17 +358,26 @@ class ESOptimizer:
     
                 agg_p_delta = torch.zeros_like(p)
                 for p_delta, z in zip(p_deltas, z_scores):
-                    agg_p_delta += p_delta * z / n / self.step_size
+                    agg_p_delta += p_delta * z / n
 
-                if self.use_adam or self.ada_mutate:
+                if self.use_adam:
                     # decay first and second moments
+                    agg_p_delta /= self.step_size
                     self.exp_avg[i] = self.betas[0] * self.exp_avg[i] + (1 - self.betas[0]) * agg_p_delta
                     self.exp_avg_sq[i] = self.betas[1] * self.exp_avg_sq[i] + (1 - self.betas[1]) * (agg_p_delta ** 2)
-                    
+                elif self.ada_mutate:
+                    # update first and second moments with unnormalized deltas
+                    self.exp_avg[i] = self.betas[0] * self.exp_avg[i] + (1 - self.betas[0]) * agg_p_delta
+                    self.exp_avg_sq[i] = self.betas[1] * self.exp_avg_sq[i] + (1 - self.betas[1]) * (agg_p_delta ** 2)
+                    agg_p_delta /= self.step_size
+
                 if self.use_adam:
                     denominator = self.exp_avg_sq[i].sqrt() + self.epsilon
                     step_size = self.lr * math.sqrt(bc2) / bc1
                     p += step_size * (self.exp_avg[i] / denominator - self.weight_decay * p)
+                elif self.ada_mutate:
+                    p += agg_p_delta  # scale update during mutation or during aggregation? probably doesnt matter much
+                    # p += agg_p_delta * self.lr
                 else:
                     p += agg_p_delta * self.lr
 
