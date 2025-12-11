@@ -83,7 +83,7 @@ class OptimizerConfig:
         elif cfg.type == "adamutate":
             lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
             ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
-            return f"adamutate_v6-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
+            return f"adamutate_v7-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
         else:
             return ""
 
@@ -223,12 +223,14 @@ class ESOptimizer:
 
             if self.ada_mutate:
                 correction = math.sqrt(bc2) / bc1
+                # TODO ablations replacing both scale terms below with step_size scalars
                 # scale mutation by adam moments
                 scale = self.exp_avg_sq[i].sqrt()
-                step = self.exp_avg[i] / (scale + self.epsilon) * correction
-                step *= self.lr  # scale update during mutation or during aggregation? probably doesnt matter much
-                # if i == 0 and len(self.mutations) == 1:
-                #     import pdb; pdb.set_trace()
+                step = self.exp_avg[i] / (scale + self.epsilon) # * correction
+                step *= self.lr  # scale mutation steps rather than final update
+                if i == 0 and len(self.mutations) == 1:
+                    print(step.mean())
+                    # import pdb; pdb.set_trace()
                 yield (
                     torch.randn(p.shape, dtype=p.dtype).to(p.device) * scale + step
                 ), seed
@@ -332,9 +334,18 @@ class ESOptimizer:
             # all mutations should have reward set by now
             n = len(self.mutations)
             rewards = [m.reward / m.eval_count for m in self.mutations]
-            mean_reward = sum(rewards) / n
-            var_reward = sum((r - mean_reward) ** 2 for r in rewards) / n
-            z_scores = [(r - mean_reward) / (var_reward ** 0.5) for r, m in zip(rewards, self.mutations) if not m.is_identity]
+            if self.ada_mutate:
+                assert self.mutations[0].is_identity
+                mean_reward = sum(rewards) / n  # TODO should really normalize by reward rather than reward delta
+                deltas = [m.reward - rewards[0] for m in self.mutations if not m.is_identity]
+                var_delta = sum(d ** 2 for d in deltas) / (n - 1)
+                norm_deltas = [d / (var_delta ** 0.5) for d in deltas]
+                weights = norm_deltas
+            else:
+                mean_reward = sum(rewards) / n
+                var_reward = sum((r - mean_reward) ** 2 for r in rewards) / n
+                z_scores = [(r - mean_reward) / (var_reward ** 0.5) for r, m in zip(rewards, self.mutations) if not m.is_identity]
+                weights = z_scores
 
             # record improved mutation count
             if self.include_parent:
@@ -357,7 +368,7 @@ class ESOptimizer:
                 p_deltas, _ = zip(*[next(d) for d in deltas])
     
                 agg_p_delta = torch.zeros_like(p)
-                for p_delta, z in zip(p_deltas, z_scores):
+                for p_delta, z in zip(p_deltas, weights):
                     agg_p_delta += p_delta * z / n
 
                 if self.use_adam:
@@ -369,15 +380,14 @@ class ESOptimizer:
                     # update first and second moments with unnormalized deltas
                     self.exp_avg[i] = self.betas[0] * self.exp_avg[i] + (1 - self.betas[0]) * agg_p_delta
                     self.exp_avg_sq[i] = self.betas[1] * self.exp_avg_sq[i] + (1 - self.betas[1]) * (agg_p_delta ** 2)
-                    agg_p_delta /= self.step_size
+                    agg_p_delta /= self.step_size # TODO this is hacky - should try to recover value from original perturbation distribution
 
                 if self.use_adam:
                     denominator = self.exp_avg_sq[i].sqrt() + self.epsilon
                     step_size = self.lr * math.sqrt(bc2) / bc1
                     p += step_size * (self.exp_avg[i] / denominator - self.weight_decay * p)
                 elif self.ada_mutate:
-                    p += agg_p_delta  # scale update during mutation or during aggregation? probably doesnt matter much
-                    # p += agg_p_delta * self.lr
+                    p += agg_p_delta  # mutation updates were already scaled by lr
                 else:
                     p += agg_p_delta * self.lr
 
