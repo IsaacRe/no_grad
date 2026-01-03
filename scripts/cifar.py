@@ -33,6 +33,7 @@ class TrainConfig:
     population_size: int = 1
     wandb_project_name: str = "no_grad-cifar"
     report_to_wandb: bool = False
+    num_epochs: int = 1
 
 
 def load_model(checkpoint_path: str, eval_mode: bool = False):
@@ -168,6 +169,7 @@ def train_es(
     iters_per_batch: int = 1,
     use_tqdm: bool = False,
     wandb_run: "WandbRun | None" = None,
+    epochs: int = 1,
 ):
     val_iter = iter(val_loader)
 
@@ -180,60 +182,61 @@ def train_es(
     avg_loss = 0
     min_loss = 1000
     step_count = 0
-    log_metrics = [("batch", f"{{}}/{len(train_loader)}"), ("step", "{}"), ("avg loss", "{:.6f}"), ("min loss", "{:.6f}"), ("lr", "{:.6f}")]
+    log_metrics = [("epoch", f"{{}}/{epochs}"), ("batch", f"{{}}/{len(train_loader)}"), ("step", "{}"), ("avg loss", "{:.6f}"), ("min loss", "{:.6f}"), ("lr", "{:.6f}")]
     if val_loader is not None:
         log_metrics.append(("val loss", "{:.6f}"))
     logger = Logger(*log_metrics, column_width=12)
     if use_tqdm:
         pbar = tqdm(total=len(train_loader) * iters_per_batch)
-    for i, (inputs, targets) in enumerate(train_loader):
-        inputs, targets = inputs.to(device=device, dtype=dtype), targets.to(device=device)
-        logger.print_header()
+    for j in range(epochs):
+        for i, (inputs, targets) in enumerate(train_loader):
+            inputs, targets = inputs.to(device=device, dtype=dtype), targets.to(device=device)
+            logger.print_header()
 
-        for _ in range(iters_per_batch):
-            optimizer.mutate()
-            
-            outputs = model(inputs)
-            
-            loss = criterion(outputs, targets).item()
-            avg_loss += loss
-            min_loss = loss if loss < min_loss else min_loss
+            for _ in range(iters_per_batch):
+                optimizer.mutate()
+                
+                outputs = model(inputs)
+                
+                loss = criterion(outputs, targets).item()
+                avg_loss += loss
+                min_loss = loss if loss < min_loss else min_loss
 
-            # if final mutation, mutation_index will reset
-            optimizer.reward_step(-loss)
-            
-            # report aggregate training loss across all mutations
-            # (this will be higher than loss for aggregated model)
-            if optimizer.mutation_index == -1:
-                avg_loss /= optimizer.population_size
-                log_vals = [i+1, step_count, avg_loss, min_loss, optimizer.lr]
+                # if final mutation, mutation_index will reset
+                optimizer.reward_step(-loss)
+                
+                # report aggregate training loss across all mutations
+                # (this will be higher than loss for aggregated model)
+                if optimizer.mutation_index == -1:
+                    avg_loss /= optimizer.population_size
+                    log_vals = [j, i+1, step_count, avg_loss, min_loss, optimizer.lr]
 
-                if val_loader is not None:
-                    try:
-                        val_inputs, val_targets = next(val_iter)
-                    except StopIteration:
-                        val_iter = iter(val_loader)
-                        val_inputs, val_targets = next(val_iter)
-                    val_inputs, val_targets = val_inputs.to(device=device, dtype=dtype), val_targets.to(device=device)
-                    val_outputs = model(val_inputs)
-                    val_loss = criterion(val_outputs, val_targets)
-                    log_vals.append(val_loss.item())
+                    if val_loader is not None:
+                        try:
+                            val_inputs, val_targets = next(val_iter)
+                        except StopIteration:
+                            val_iter = iter(val_loader)
+                            val_inputs, val_targets = next(val_iter)
+                        val_inputs, val_targets = val_inputs.to(device=device, dtype=dtype), val_targets.to(device=device)
+                        val_outputs = model(val_inputs)
+                        val_loss = criterion(val_outputs, val_targets)
+                        log_vals.append(val_loss.item())
 
-                avg_loss = 0
-                min_loss = 1000
-                step_count += 1
-                logger.print_metrics(*log_vals)
+                    avg_loss = 0
+                    min_loss = 1000
+                    step_count += 1
+                    logger.print_metrics(*log_vals)
 
-                if wandb_run is not None:
-                    vals = {k: v for k, v in zip([m[0] for m in log_metrics], log_vals)}
-                    # track forward pass count
-                    vals["forwards"] = step_count * optimizer.population_size
-                    vals["step_size"] = optimizer.step_size
-                    vals.update(optimizer.aggregation_metrics)
-                    wandb_run.log(vals)
+                    if wandb_run is not None:
+                        vals = {k: v for k, v in zip([m[0] for m in log_metrics], log_vals)}
+                        # track forward pass count
+                        vals["forwards"] = step_count * optimizer.population_size
+                        vals["step_size"] = optimizer.step_size
+                        vals.update(optimizer.aggregation_metrics)
+                        wandb_run.log(vals)
 
-            if use_tqdm:
-                pbar.update(1)
+                if use_tqdm:
+                    pbar.update(1)
 
     if use_tqdm:
         pbar.close()
@@ -276,6 +279,7 @@ def main():
                 val_loader=val_loader,
                 iters_per_batch=cfg.es_updates_per_batch * optimizer.population_size,
                 wandb_run=maybe_wandb_run,
+                epochs=cfg.num_epochs,
             )
         else:
             train_sgd(

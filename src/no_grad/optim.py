@@ -46,6 +46,7 @@ class ESParams(OptimizerParams):
     agg_strategy: PopulationAggStrategy = field(default_factory=PopulationAggStrategy)
     include_parent: bool = True
     persist_parent: bool = True
+    do_spsa: bool = False
 
 
 @dataclass
@@ -73,13 +74,15 @@ class OptimizerConfig:
             else:
                 lr_gamma = f"-lr_gamma{cfg.es.lr_gamma}" if cfg.es.lr_gamma != 1.0 else ""
                 ss_gamma = f"-ss_gamma{cfg.es.step_gamma}" if cfg.es.step_gamma != 1.0 else ""
-                return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}{lr_gamma}{ss_gamma}"
+                spsa = f"-spsa" if cfg.es.do_spsa else ""
+                return f"es-lr{cfg.es.lr}-p{cfg.es.population_size}-s{cfg.es.step_size}{lr_gamma}{ss_gamma}{spsa}"
         elif cfg.type == "adam":
             return f"adam-lr{cfg.adam.lr}-b{cfg.adam.betas[0]}_{cfg.adam.betas[1]}-w{cfg.adam.weight_decay}-e{cfg.adam.eps}"
         elif cfg.type == "es_adam":
             lr_gamma = f"-lr_gamma{cfg.es_adam.lr_gamma}" if cfg.es_adam.lr_gamma != 1.0 else ""
             ss_gamma = f"-ss_gamma{cfg.es_adam.step_gamma}" if cfg.es_adam.step_gamma != 1.0 else ""
-            return f"es_adam-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}"
+            spsa = f"-spsa" if cfg.es_adam.do_spsa else ""
+            return f"es_adam-lr{cfg.es_adam.lr}-p{cfg.es_adam.population_size}-s{cfg.es_adam.step_size}-b{cfg.es_adam.betas[0]}_{cfg.es_adam.betas[1]}-w{cfg.es_adam.weight_decay}-e{cfg.es_adam.eps}{lr_gamma}{ss_gamma}{spsa}"
         else:
             return ""
 
@@ -88,6 +91,7 @@ class OptimizerConfig:
 class EvMutation:
     param_seeds: list[int] = field(default_factory=list)
     is_identity: bool = False
+    is_inverse: bool = False
     reward: float | None = None
     eval_count: int = 0
     
@@ -111,6 +115,7 @@ class ESOptimizer:
         lr_gamma: float = 1.0,
         step_gamma: float = 1.0,
         r_accum_steps: int = 1,
+        do_spsa: bool = False,
         param_groups: list[dict] = [],
     ):
         if not (param_groups or params):
@@ -137,6 +142,7 @@ class ESOptimizer:
         self.parent_params = None
         self.lr_gamma = lr_gamma
         self.step_gamma = step_gamma
+        self.do_spsa = do_spsa
         if persist_parent:
             with torch.no_grad():
                 # create separate parameter list with shared data
@@ -194,7 +200,7 @@ class ESOptimizer:
         else:
             raise RuntimeError(f"conversion to ESOptimizer not supported for {type(optim)}")
 
-    def _param_delta_iter(self, param_seeds: list[int] | None = None):
+    def _param_delta_iter(self, param_seeds: list[int] | None = None, invert: bool = False):
         if param_seeds is None:
             param_seeds = [None] * len(self.params)
         elif len(param_seeds) != len(self.params):
@@ -206,7 +212,10 @@ class ESOptimizer:
             else:
                 torch.manual_seed(seed)
             
-            yield torch.randn(p.shape, dtype=p.dtype).to(p.device) * self.step_size, seed
+            if invert:
+                yield -torch.randn(p.shape, dtype=p.dtype).to(p.device) * self.step_size, seed
+            else:
+                yield torch.randn(p.shape, dtype=p.dtype).to(p.device) * self.step_size, seed
 
     @property
     def mutation_index(self):
@@ -227,7 +236,7 @@ class ESOptimizer:
                     p.data = p_parent.data
             else:
                 # regenerate deltas from param seeds and subtract to get non-mutated tensor
-                for p, (delta_p, _) in zip(self.params, self._param_delta_iter(self.active_mutation.param_seeds)):
+                for p, (delta_p, _) in zip(self.params, self._param_delta_iter(self.active_mutation.param_seeds, invert=self.active_mutation.is_inverse)):
                     p -= delta_p
         self.active_mutation = None
 
@@ -239,18 +248,34 @@ class ESOptimizer:
                 # save mutation to reference current unperturbed weights
                 new_mutation = EvMutation(is_identity=True)
             else:
-                # make new mutation
-                param_seeds = []
-                for p, (delta_p, seed) in zip(self.params, self._param_delta_iter()):
-                    if self.persist_parent:
-                        # can't use inplace if we have shared data ptr with current parent
-                        # instead we create a new tensor from applied delta and update ptr
-                        # of mutated weight to point to it
-                        p.data = p + delta_p
-                    else:
-                        p += delta_p
-                    param_seeds.append(seed)
-                new_mutation = EvMutation(param_seeds)
+                if self.do_spsa and self.mutation_index + int(self.include_parent) % 2 == 0:
+                    # make inverse of last mutation
+                    parent_mutation = self.mutations[self.mutation_index]
+                    for p, (delta_p, _) in zip(self.params, self._param_delta_iter(parent_mutation.param_seeds, invert=True)):
+                        if self.persist_parent:
+                            # can't use inplace if we have shared data ptr with current parent
+                            # instead we create a new tensor from applied delta and update ptr
+                            # of mutated weight to point to it
+                            p.data = p + delta_p  # apply inverse of parent mutation
+                        else:
+                            p += delta_p          # apply inverse of parent mutation
+                    new_mutation = EvMutation(
+                        param_seeds=parent_mutation.param_seeds,
+                        is_inverse=True,
+                    )
+                else:
+                    # make new mutation
+                    param_seeds = []
+                    for p, (delta_p, seed) in zip(self.params, self._param_delta_iter()):
+                        if self.persist_parent:
+                            # can't use inplace if we have shared data ptr with current parent
+                            # instead we create a new tensor from applied delta and update ptr
+                            # of mutated weight to point to it
+                            p.data = p + delta_p
+                        else:
+                            p += delta_p
+                        param_seeds.append(seed)
+                    new_mutation = EvMutation(param_seeds)
 
             new_mutation.reward = 0.0  # initialize for accumulation
             self.mutations.append(new_mutation)
@@ -300,9 +325,7 @@ class ESOptimizer:
                 sampled_index: int = torch.argmax(rewards).item()
             sampled = self.mutations[sampled_index]
             if not sampled.is_identity:
-                for p, (p_delta, _) in zip(self.params, self._param_delta_iter(sampled.param_seeds)):
-                    # if persist_parent is True, p and p_parent should share data
-                    # so we need only update one
+                for p, (p_delta, _) in zip(self.params, self._param_delta_iter(sampled.param_seeds, invert=sampled.is_inverse)):
                     p += p_delta
         else:       
             # weighted avg mutations based on their reward z-score
@@ -310,8 +333,12 @@ class ESOptimizer:
             n = len(self.mutations)
             rewards = [m.reward / m.eval_count for m in self.mutations]
             mean_reward = sum(rewards) / n
-            var_reward = sum((r - mean_reward) ** 2 for r in rewards) / n
-            z_scores = [(r - mean_reward) / (var_reward ** 0.5) for r, m in zip(rewards, self.mutations) if not m.is_identity]
+            if self.do_spsa:
+                # SPSA doesnt normalize by reward variance
+                z_scores = [(r - mean_reward) for r, m in zip(rewards, self.mutations) if not m.is_identity]
+            else:
+                var_reward = sum((r - mean_reward) ** 2 for r in rewards) / n
+                z_scores = [(r - mean_reward) / (var_reward ** 0.5 + self.epsilon) for r, m in zip(rewards, self.mutations) if not m.is_identity]
 
             # record improved mutation count
             if self.include_parent:
@@ -329,7 +356,7 @@ class ESOptimizer:
                 bc1 = 1 - self.betas[0] ** self.step
                 bc2 = 1 - self.betas[1] ** self.step
 
-            deltas = [self._param_delta_iter(m.param_seeds) for m in self.mutations if not m.is_identity]
+            deltas = [self._param_delta_iter(m.param_seeds, invert=m.is_inverse) for m in self.mutations if not m.is_identity]
             for i, p in enumerate(tqdm(self.params)):
                 p_deltas, _ = zip(*[next(d) for d in deltas])
     
@@ -378,6 +405,7 @@ def get_optimizer(
             persist_parent=config.es.persist_parent,
             lr_gamma=config.es.lr_gamma,
             step_gamma=config.es.step_gamma,
+            do_spsa=config.es.do_spsa,
         )
     elif config.type == "es_adam":
         sample_temp = (config.es_adam.agg_strategy.sample.temp if
@@ -397,6 +425,7 @@ def get_optimizer(
             weight_decay=config.es_adam.weight_decay,
             lr_gamma=config.es_adam.lr_gamma,
             step_gamma=config.es_adam.step_gamma,
+            do_spsa=config.es_adam.do_spsa,
         )
     elif config.type == "sgd":
         return torch.optim.SGD(
